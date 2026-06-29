@@ -50,20 +50,24 @@
           echo "[pierogi] harvesting crun dev headers"
           mkdir -p $out/include/crun $out/include/ocispec
 
-          # crun's own headers + the generated config.h / git-version.h
-          cp src/libcrun/*.h $out/include/crun/ || true
-          [ -f config.h ]      && cp config.h      $out/include/crun/ || true
-          [ -f git-version.h ] && cp git-version.h $out/include/crun/ || true
+          # crun's source headers, plus config.h — which is generated at the
+          # build root by AC_CONFIG_HEADERS, not in src/libcrun, and is pulled by
+          # `#include <config.h>` in container.h.
+          # (git-version.h is deliberately NOT harvested: it's #include'd only by
+          # crun's .c files, already compiled into libcrun.so — no public header
+          # we consume references it.)
+          cp src/libcrun/*.h $out/include/crun/
+          cp config.h $out/include/crun/
 
-          # generated libocispec schema headers (still needed at compile time;
-          # container.h includes <ocispec/...> even though the symbols live in .so)
-          schema=$(find . -name 'runtime_spec_schema_config_schema.h' | head -1)
-          if [ -n "$schema" ]; then
-            cp "$(dirname "$schema")"/*.h $out/include/ocispec/ || true
-          fi
+          # generated libocispec schema headers — still needed at compile time
+          # (container.h includes <ocispec/...> even though the symbols live in
+          # the .so). Drop the basic_test* fixtures: libocispec test schemas,
+          # not real API.
+          cp libocispec/src/ocispec/*.h $out/include/ocispec/
+          rm -f $out/include/ocispec/basic_test*
 
-          echo "[pierogi] installed headers:" ; ls $out/include/crun $out/include/ocispec || true
-          echo "[pierogi] installed libs:"    ; ls $out/lib || true
+          echo "[pierogi] installed headers:" ; ls $out/include/crun $out/include/ocispec
+          echo "[pierogi] installed libs:"    ; ls $out/lib
         '';
       });
     in
