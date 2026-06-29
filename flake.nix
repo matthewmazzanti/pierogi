@@ -27,20 +27,13 @@
         # consumers link just `-lcrun` with deps resolved via DT_NEEDED + rpath.
         configureFlags = (old.configureFlags or [ ]) ++ [ "--enable-shared" ];
 
-        # libcrun.a is a static archive and records no dependency metadata, so
-        # anything that links it must also link yajl/seccomp/cap/criu/systemd.
-        # These are crun's own buildInputs (used only during *its* build);
-        # promote them to propagatedBuildInputs so consumers (our build.rs / the
-        # devshell) get them on the include+lib search path just by depending on
-        # crunDev — no need to re-list the chain. (build.rs still emits the
-        # matching -l flags; propagation provides the -L/-I paths.)
-        propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ (with pkgs; [
-          libcap
-          libseccomp
-          yajl
-          criu
-          systemdMinimal
-        ]);
+        # We link the shared libcrun.so, which carries its own deps (cap,
+        # seccomp, criu, systemd) via DT_NEEDED + RUNPATH — so consumers neither
+        # link nor search for those. The one thing still needed downstream is
+        # yajl's *headers* at compile time: crun's container.h transitively does
+        # `#include <yajl/yajl_tree.h>`. Propagate just yajl so consumers get
+        # that include path from crunDev.
+        propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [ pkgs.yajl ];
 
         # crun's `make install` installs the lib (libcrun.so via --enable-shared)
         # but NO headers, under any flag. So we still harvest the headers the
