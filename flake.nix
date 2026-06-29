@@ -42,8 +42,12 @@
           systemdMinimal
         ]);
 
+        # crun's `make install` installs the lib (libcrun.so via --enable-shared)
+        # but NO headers, under any flag. So we still harvest the headers the
+        # shim needs to compile. (We no longer harvest libocispec.a — ocispec is
+        # folded into libcrun.so now, so there's nothing to link separately.)
         postInstall = (old.postInstall or "") + ''
-          echo "[pierogi] harvesting crun dev headers + static libs"
+          echo "[pierogi] harvesting crun dev headers"
           mkdir -p $out/include/crun $out/include/ocispec
 
           # crun's own headers + the generated config.h / git-version.h
@@ -51,14 +55,12 @@
           [ -f config.h ]      && cp config.h      $out/include/crun/ || true
           [ -f git-version.h ] && cp git-version.h $out/include/crun/ || true
 
-          # generated libocispec schema headers (wherever codegen put them)
+          # generated libocispec schema headers (still needed at compile time;
+          # container.h includes <ocispec/...> even though the symbols live in .so)
           schema=$(find . -name 'runtime_spec_schema_config_schema.h' | head -1)
           if [ -n "$schema" ]; then
             cp "$(dirname "$schema")"/*.h $out/include/ocispec/ || true
           fi
-
-          # libcrun.a is already installed; add the ocispec static lib it needs
-          find . -name 'libocispec.a' -exec cp {} $out/lib/ \; || true
 
           echo "[pierogi] installed headers:" ; ls $out/include/crun $out/include/ocispec || true
           echo "[pierogi] installed libs:"    ; ls $out/lib || true
