@@ -20,6 +20,22 @@
         # skip the (slow) upstream test suite for our dev build
         doCheck = false;
         doInstallCheck = false;
+
+        # libcrun.a is a static archive and records no dependency metadata, so
+        # anything that links it must also link yajl/seccomp/cap/criu/systemd.
+        # These are crun's own buildInputs (used only during *its* build);
+        # promote them to propagatedBuildInputs so consumers (our build.rs / the
+        # devshell) get them on the include+lib search path just by depending on
+        # crunDev — no need to re-list the chain. (build.rs still emits the
+        # matching -l flags; propagation provides the -L/-I paths.)
+        propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ (with pkgs; [
+          libcap
+          libseccomp
+          yajl
+          criu
+          systemdMinimal
+        ]);
+
         postInstall = (old.postInstall or "") + ''
           echo "[pierogi] harvesting crun dev headers + static libs"
           mkdir -p $out/include/crun $out/include/ocispec
@@ -67,12 +83,8 @@
               # youki path
               libseccomp
               nix
-              # crun/libcrun link chain (libcrun.a + its transitive deps)
+              # crun/libcrun: brings libcrun + its link chain via propagation
               crunDev
-              libcap
-              yajl
-              criu
-              systemdMinimal
             ];
 
             LIBSECCOMP_LIB_PATH = "${pkgs.libseccomp.lib}/lib";
