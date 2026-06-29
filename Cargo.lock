@@ -774,23 +774,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "pierogi-cli"
+name = "pierogi"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
- "pierogi-engine",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "pierogi-engine"
-version = "0.0.0"
-dependencies = [
- "anyhow",
  "libc",
  "libcontainer",
  "oci-spec",
+ "tracing-subscriber",
 ]
 
 [[package]]

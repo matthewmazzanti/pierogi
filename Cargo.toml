@@ -1,14 +1,14 @@
-[workspace]
-resolver = "2"
-members = ["crates/pierogi-engine", "crates/pierogi-cli"]
-default-members = ["crates/pierogi-cli"]
-
-[workspace.package]
+[package]
+name = "pierogi"
+version = "0.0.0"
 edition = "2021"
 license = "MIT"
-version = "0.0.0"
 
-[workspace.dependencies]
+[[bin]]
+name = "pierogi"
+path = "src/main.rs"
+
+[dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
