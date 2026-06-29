@@ -6,17 +6,14 @@
  *
  * Build (inside `nix develop`, with $CRUN_DEV from the flake):
  *
- *   cc csrc/smoke.c \
- *     -I"$CRUN_DEV/include" -I"$CRUN_DEV/include/crun" \
- *     -Wl,--start-group \
- *       "$CRUN_DEV/lib/libcrun.a" "$CRUN_DEV/lib/libocispec.a" \
- *       -lyajl -lseccomp -lcap -lcriu -lsystemd \
- *     -Wl,--end-group \
- *     -lm -lpthread -ldl \
- *     -o /tmp/crun-smoke
+ *   cc csrc/smoke.c -I"$CRUN_DEV/include/crun" -lcrun -o /tmp/crun-smoke
  *
- * This exact recipe (start-group around the two static libs, then the
- * yajl/seccomp/cap/criu/systemd chain) is what the build.rs will emit. */
+ * crunDev builds libcrun with --enable-shared, so libcrun.so carries its deps
+ * (yajl/seccomp/cap/criu/systemd + folded-in libocispec) as DT_NEEDED with a
+ * nix RUNPATH. So a consumer links just `-lcrun`; everything else resolves
+ * automatically at link and run time. (The one explicit -I is for crun's
+ * internal `#include <config.h>`; the crun + yajl include roots come from the
+ * wrapper via crunDev's buildInputs.) This is what build.rs will emit. */
 #include <crun/container.h>
 
 #include <stdbool.h>

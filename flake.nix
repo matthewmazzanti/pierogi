@@ -21,6 +21,12 @@
         doCheck = false;
         doInstallCheck = false;
 
+        # crun defaults to LT_INIT([disable-shared]) → static-only. --enable-shared
+        # builds a real libcrun.so (exports curated via libcrun.lds: libcrun_*
+        # public + the bundled libocispec runtime_spec_* symbols), letting
+        # consumers link just `-lcrun` with deps resolved via DT_NEEDED + rpath.
+        configureFlags = (old.configureFlags or [ ]) ++ [ "--enable-shared" ];
+
         # libcrun.a is a static archive and records no dependency metadata, so
         # anything that links it must also link yajl/seccomp/cap/criu/systemd.
         # These are crun's own buildInputs (used only during *its* build);
