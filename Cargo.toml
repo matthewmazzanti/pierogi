@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/pierogi-engine", "crates/pierogi-cli"]
+default-members = ["crates/pierogi-cli"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.0.0"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+# youki, driven in-process. oci-spec is pinned to the major libcontainer 0.6
+# depends on (^0.9) so the spec types are shared, not two incompatible copies.
+libcontainer = "0.6"
+oci-spec = { version = "0.9", features = ["runtime"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
