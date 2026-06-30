@@ -82,6 +82,8 @@
               rustfmt
               rust-analyzer
               pkg-config
+              # startup-time benchmarking (bench.sh)
+              hyperfine
             ];
 
             buildInputs = with pkgs; [

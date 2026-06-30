@@ -5,10 +5,17 @@
 //! path), so the sandbox sees *exactly* the target's closure and nothing else
 //! of the host store.
 
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+
+/// Bench/test escape hatch: a `:`-separated list of store paths that *replaces*
+/// the `nix-store --query --requisites` call. The query costs tens of ms, which
+/// swamps the runtime-backend startup we want to measure — precompute the
+/// closure once and feed it in here to isolate that. Not for production use.
+const CLOSURE_OVERRIDE_ENV: &str = "PIEROGI_CLOSURE";
 
 /// Resolve a command (bare name or path) to a canonical executable that lives
 /// in `/nix/store`.
@@ -58,7 +65,14 @@ pub fn store_root(path: &Path) -> Result<PathBuf> {
 }
 
 /// Compute the transitive runtime closure (requisites) of a store path.
+///
+/// Honors the [`CLOSURE_OVERRIDE_ENV`] stub: if set, its paths are used verbatim
+/// and `nix-store` is not run.
 pub fn closure_of(store_path: &Path) -> Result<Vec<PathBuf>> {
+    if let Some(val) = std::env::var_os(CLOSURE_OVERRIDE_ENV) {
+        return parse_closure_override(&val);
+    }
+
     let out = Command::new("nix-store")
         .arg("--query")
         .arg("--requisites")
@@ -83,6 +97,28 @@ pub fn closure_of(store_path: &Path) -> Result<Vec<PathBuf>> {
 
     if paths.is_empty() {
         bail!("empty closure for {}", store_path.display());
+    }
+    Ok(paths)
+}
+
+/// Parse the `PIEROGI_CLOSURE` stub: `:`-separated store paths. Fails loud on an
+/// empty list or any entry outside `/nix/store` — a bad stub should abort, not
+/// silently fall back to a real query.
+fn parse_closure_override(val: &OsStr) -> Result<Vec<PathBuf>> {
+    let paths: Vec<PathBuf> = std::env::split_paths(val)
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+
+    if paths.is_empty() {
+        bail!("{CLOSURE_OVERRIDE_ENV} is set but lists no paths");
+    }
+    for p in &paths {
+        if !p.starts_with("/nix/store/") {
+            bail!(
+                "{CLOSURE_OVERRIDE_ENV} entry {} is not under /nix/store",
+                p.display()
+            );
+        }
     }
     Ok(paths)
 }
