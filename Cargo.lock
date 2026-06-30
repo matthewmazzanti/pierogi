@@ -778,10 +778,12 @@ name = "pierogi"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "cc",
  "clap",
  "libc",
  "libcontainer",
  "oci-spec",
+ "serde_json",
  "tracing-subscriber",
 ]
 

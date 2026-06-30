@@ -8,6 +8,12 @@ license = "MIT"
 name = "pierogi"
 path = "src/main.rs"
 
+[features]
+# libcrun backend via the FFI shim in csrc/shim.c. Off by default so the plain
+# `cargo build` (youki only) needs no C toolchain or CRUN_DEV. Build with
+# `--features crun` inside `nix develop`.
+crun = []
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -16,4 +22,10 @@ libc = "0.2"
 # depends on (^0.9) so the spec types are shared, not two incompatible copies.
 libcontainer = "0.6"
 oci-spec = { version = "0.9", features = ["runtime"] }
+# spec -> JSON string for libcrun's load_from_memory (crun backend).
+serde_json = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+# compiles csrc/shim.c when the `crun` feature is enabled.
+cc = "1"

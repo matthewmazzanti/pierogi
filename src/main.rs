@@ -5,12 +5,17 @@
 //! Nix closure** of the target binary. Deliberately crude — no synthetic `/etc`,
 //! no strict defaults, no nice spec format. See `docs/roadmap.md` (M0).
 //!
-//! Status: **working** on youki (`libcontainer`); evaluating libcrun next.
-//! Findings from getting the youki path working:
+//! Status: **working** on both backends (`--runtime`): youki (`libcontainer`)
+//! and crun (libcrun via the FFI shim in `csrc/shim.c`). Findings:
 //!
 //! * **config.json on disk.** youki's public API reads `config.json` from a
-//!   bundle dir, so we serialize the in-memory spec out. libcrun's
-//!   `load_from_memory` avoids this — a reason we're evaluating it.
+//!   bundle dir, so the youki backend serializes the in-memory spec out. The
+//!   crun backend skips this — `libcrun_container_load_from_memory` takes the
+//!   spec as a JSON string, so nothing touches disk. This was a core reason for
+//!   the libcrun pivot.
+//! * **rootfs path resolution differs.** youki resolves `root.path` against the
+//!   bundle dir; libcrun resolves it against cwd. The crun backend rewrites
+//!   `root.path` to an absolute path before handing the spec over.
 //! * **devices.** Don't put device nodes in `mounts[]` (bind of a char device
 //!   via the generic mount path → EINVAL). youki's `default_devices()`
 //!   populates `/dev` itself (bind in rootless mode); we just mount `/dev`
@@ -24,6 +29,7 @@
 
 mod closure;
 mod run;
+mod runtime;
 mod spec;
 
 use anyhow::Result;
@@ -41,6 +47,11 @@ enum Cmd {
     /// Run a command in a namespaced, read-only sandbox built from its Nix
     /// closure, e.g. `pierogi run -- bash`.
     Run {
+        /// Runtime backend: `youki` (default) or `crun` (needs the `crun`
+        /// build feature).
+        #[arg(long, default_value = "youki")]
+        runtime: String,
+
         /// Command and arguments (everything after `--`).
         #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
         argv: Vec<String>,
@@ -59,6 +70,9 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Run { argv } => run::run(argv),
+        Cmd::Run { runtime, argv } => {
+            let backend = runtime::Backend::parse(&runtime)?;
+            run::run(argv, backend)
+        }
     }
 }

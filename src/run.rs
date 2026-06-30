@@ -1,14 +1,16 @@
-//! Orchestrate one spike run: closure -> bundle -> drive youki -> wait.
+//! Orchestrate one spike run: closure -> bundle -> drive a backend -> exit.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{ensure, Context, Result};
 
 use crate::closure::{closure_of, resolve_store_exe, store_root};
+use crate::runtime::Backend;
 use crate::spec::{build_spec, SpecInputs};
 
-/// Run `argv` in a namespaced, read-only sandbox built from its Nix closure.
-pub fn run(argv: Vec<String>) -> Result<()> {
+/// Run `argv` in a namespaced, read-only sandbox built from its Nix closure,
+/// driven by the chosen runtime backend.
+pub fn run(argv: Vec<String>, backend: Backend) -> Result<()> {
     ensure!(!argv.is_empty(), "no command given");
 
     // 1. Resolve the target into the store and compute its closure.
@@ -53,18 +55,16 @@ pub fn run(argv: Vec<String>) -> Result<()> {
         gid,
     })?;
 
-    // NOTE(spike): youki's public builder reads config.json from the bundle, so
-    // we serialize the in-memory spec here. Removing this round-trip (in-memory
-    // injection) is a core M0 finding — see lib.rs / docs/roadmap.md.
-    spec.save(bundle.join("config.json"))
-        .context("writing config.json")?;
-
-    // 3. Drive youki in-process: create -> start -> wait.
-    let result = drive(&id, &bundle, &state);
+    // 3. Drive the chosen backend in-process. youki serializes config.json to
+    // the bundle; crun loads the spec from memory. Both block until exit.
+    let result = backend.run(&spec, &id, &bundle, &state);
 
     // 4. Best-effort cleanup.
     let _ = std::fs::remove_dir_all(&work);
-    result
+
+    let code = result?;
+    eprintln!("pierogi: shell exited ({code})");
+    Ok(())
 }
 
 /// Where to lay out the bundle/state.
@@ -78,51 +78,4 @@ pub fn run(argv: Vec<String>) -> Result<()> {
 /// (upstream youki) or build the rootfs mount ourselves.
 fn runtime_dir() -> PathBuf {
     std::env::temp_dir()
-}
-
-/// Build (create) + start the container, then block until it exits.
-///
-/// NOTE(spike): the youki `libcontainer` surface has churned across releases.
-/// If this doesn't compile against the pinned version, the likely culprits are
-/// the executor (`libcontainer::workload::default`) and the builder method
-/// names — check the crate docs and adjust. The *shape* (new -> root path ->
-/// as_init(bundle) -> build -> start -> wait on pid) is stable.
-fn drive(id: &str, bundle: &Path, state: &Path) -> Result<()> {
-    use libcontainer::container::builder::ContainerBuilder;
-    use libcontainer::syscall::syscall::SyscallType;
-    use libcontainer::workload::default::DefaultExecutor;
-
-    let mut container = ContainerBuilder::new(id.to_string(), SyscallType::default())
-        .with_executor(DefaultExecutor {})
-        .with_root_path(state.to_path_buf())
-        .context("setting container state path")?
-        .as_init(bundle.to_path_buf())
-        .with_systemd(false)
-        .with_detach(false)
-        .build()
-        .context("creating container (namespaces, rootfs, mounts)")?;
-
-    container.start().context("starting container")?;
-
-    let pid = container
-        .pid()
-        .context("container reported no pid after start")?
-        .as_raw();
-
-    let mut status: libc::c_int = 0;
-    let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
-    if rc < 0 {
-        return Err(std::io::Error::last_os_error()).context("waitpid on container init");
-    }
-
-    // Clean up container state (ignore errors — process already exited).
-    let _ = container.delete(true);
-
-    let code = if libc::WIFEXITED(status) {
-        libc::WEXITSTATUS(status)
-    } else {
-        0
-    };
-    eprintln!("pierogi: shell exited ({code})");
-    Ok(())
 }
