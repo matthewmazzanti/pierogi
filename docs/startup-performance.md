@@ -4,8 +4,8 @@ Pierogi's reason to exist is launching small, namespaced processes **very
 fast**. This doc records where the startup time goes, what we measured, and
 which levers actually move it — so we don't re-derive it.
 
-Target: **< 10 ms** of sandbox overhead per `pierogi run` (the cost on top of
-the workload itself).
+Target: **< 10 ms** of sandbox overhead per launch (`pierogi wrap`/`run`) — the
+cost on top of the workload itself.
 
 ## TL;DR
 
@@ -19,6 +19,11 @@ the workload itself).
   process sleep + socket-handshake choreography that crun's design avoids.
 
 ## How to measure
+
+**Convention:** the **libcrun** and **youki** figures here are
+hyperfine-measured. The cross-tool comparison in [Where we sit](#where-we-sit)
+is order-of-magnitude **estimate** for every tool *except* our own measured
+libcrun/youki rows.
 
 `bench.sh` (needs `nix develop` for hyperfine + `$CRUN_DEV`):
 
@@ -49,8 +54,10 @@ Numbers are crun, closure-query stubbed, from the read-only store unless noted.
 
 ### 1. The closure query (~35 ms) — the real elephant
 
-Every `pierogi run` shells out to `nix-store --query --requisites` to compute
-the target's runtime closure (one read-only bind mount per store path). At
+Every *live* launch (`pierogi wrap`, or `run` of an unresolved spec) shells out
+to `nix-store --query --requisites` to compute the target's runtime closure (one
+read-only bind mount per store path) — a pre-baked spec carrying `closure:` skips
+it (see [execution-modes.md](execution-modes.md)). At
 ~35 ms it's **larger than the entire runtime**. It's a fixed cost that hits both
 backends equally, which is why `bench.sh` stubs it out to compare runtimes.
 
@@ -107,19 +114,22 @@ Consequences:
 
 ## Where we sit
 
-Rough, order-of-magnitude — hardware/config varies, but the tiers hold:
+Order-of-magnitude — hardware/config varies, but the tiers hold. **Every row is
+an estimate except the two measured pierogi rows (libcrun, youki)**, which are
+hyperfine numbers from our spike:
 
 | Tool | startup | notes |
 |------|---------|-------|
-| raw `fork`+`exec` | ~1 ms | no sandbox |
-| bubblewrap (Flatpak) | ~3–10 ms | light namespaces, no OCI/cgroups |
-| **pierogi / crun, from store** | **~11.5 ms** | full OCI spec, RO nix-closure rootfs |
-| `crun`/`runc` CLI | ~20–50 ms | + cgroups, on-disk config, memfd copy |
-| podman | ~150–400 ms | + image/storage plumbing |
-| docker | ~200–800 ms | + daemon, networking |
-| gVisor (runsc) | ~150 ms+ | userspace kernel |
-| Firecracker | ~125 ms+ | boots a kernel |
-| Kata / full VM | ~1 s+ | full VM |
+| raw `fork`+`exec` | ~1 ms (est.) | no sandbox |
+| bubblewrap (Flatpak) | ~3–10 ms (est.) | light namespaces, no OCI/cgroups |
+| **pierogi / libcrun, from store** | **~11.5 ms (measured)** | full OCI spec, RO nix-closure rootfs |
+| **pierogi / youki, from store** | **~45 ms (measured)** | intermediate-process sleep + socket handshake |
+| `crun`/`runc` CLI | ~20–50 ms (est.) | + cgroups, on-disk config, memfd copy |
+| podman | ~150–400 ms (est.) | + image/storage plumbing |
+| docker | ~200–800 ms (est.) | + daemon, networking |
+| gVisor (runsc) | ~150 ms+ (est.) | userspace kernel |
+| Firecracker | ~125 ms+ (est.) | boots a kernel |
+| Kata / full VM | ~1 s+ (est.) | full VM |
 
 We're in the **bubblewrap tier** while doing *more* than bwrap (full OCI spec,
 structured rootfs). For interactive launches this is imperceptible. It only

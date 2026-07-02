@@ -2,13 +2,15 @@
 
 This document describes the component structure of the Pierogi engine, the
 sandbox setup sequence, and the boundary between the Rust runtime and the Nix
-configuration layer. See [vision.md](vision.md) for goals and non-goals.
+configuration layer. See [vision.md](vision.md) for goals and non-goals, and
+[execution-modes.md](execution-modes.md) for the verbs (`wrap`/`run`/`resolve`),
+the config→spec resolution pipeline, and the `closure:` fast-path.
 
 ## Layered overview
 
 ```
    WRAP MODE (generate at RUNTIME)        NIX MODE (built AHEAD, in store)
-   pierogi run -- <bin|store-path>        pierogi run /nix/store/…-sandbox
+   pierogi wrap -- <bin|store-path>       pierogi run /nix/store/…-sandbox
             │                                       │
    engine generates live:                  Nix derivation pre-built:
     • spec (runtime concerns)               • ./spec    (serialized)
@@ -48,25 +50,37 @@ changes. The exact serialized **spec format** is still open in detail (see
 now fixed: it is what Nix materializes into the store and what wrap mode
 generates on the fly.
 
-**Second invariant: we don't reimplement the low-level mechanics.** The actual
-`unshare`/`clone`/`pivot_root`/cgroup/seccomp-load/`exec` dance is delegated to
-an embedded OCI runtime — **youki**'s `libcontainer` crate (in-process Rust) as
-the primary backend, with **libcrun** (C, via FFI) as an alternative. Pierogi
-drives the runtime **as a library, building its config in memory** — it never
-writes an OCI bundle / `config.json` to disk and never shells out to a runtime
-CLI. We reuse the runtime's battle-tested process model; Pierogi's value-add is
-everything *around* it: the strict-by-default front-ends, synthetic system
-state, the proxy layers, and the Nix integration.
+**Second principle: delegate the low-level mechanics *by default* — a
+security-cost decision, not dogma.** The goal is *namespaces (and the rest of the
+confinement dance) by any means that clears the security bar*. The actual
+`unshare`/`clone`/`pivot_root`/cgroup/seccomp-load/`exec` sequence is deep,
+security-critical, and the *least* differentiated code we could write — so today
+we delegate it to an existing runtime rather than own it. **Hand-rolling it is a
+live option, currently rejected on that cost basis, not refused on principle** —
+it comes back on the table the moment it can meet the security bar. The specific
+backend (youki, libcrun, bwrap, or something leaner/hand-rolled) is deliberately
+*not* fixed here: it's chosen by the security bar first, then the
+[startup measurements](startup-performance.md) and the tech-choices comparison,
+behind one narrow trait (see [runtime backend abstraction](#runtime-backend-abstraction)).
+Where the chosen backend exposes a library API, Pierogi drives it **in-process,
+building its config in memory** — no OCI bundle / `config.json` on disk, no
+runtime-CLI subprocess — because the exec-a-CLI path costs the startup we're
+trying to save. Pierogi's value-add is everything *around* the mechanics: the
+strict-by-default front-ends, synthetic system state, the proxy layers, and the
+Nix integration.
 
 ## Language & crates
 
 Rust. Core dependencies (candidates):
 
-- **Runtime backend — `youki` `libcontainer`** (primary). The in-process Rust
-  OCI runtime library that performs the namespace/cgroup/seccomp/`exec`
-  mechanics. We construct its config in memory and drive container
-  create/start directly. **`libcrun`** (C, via a thin FFI binding) is the
-  fallback backend behind the same internal trait.
+- **Runtime backend — behind one trait, choice not yet fixed.** Candidates:
+  **`youki` `libcontainer`** (in-process Rust, no FFI, builds from `oci-spec`
+  types we hold in memory) and **`libcrun`** (mature C, via a thin FFI binding).
+  Both are driven in-memory — construct the config, call create/start, no
+  `config.json`. The choice is gated on the security bar first, then startup
+  cost; today's spike measures libcrun ~4× faster than youki (see
+  [startup-performance.md](startup-performance.md)). A leaner/hand-rolled or
+  `bwrap`-style path is not excluded — see the second principle above.
 - **`oci-spec`** — the `oci_spec::runtime::Spec` types youki consumes. We build
   these in memory from the pierogi spec; they are an *internal* representation,
   never serialized to a `config.json` on disk.
@@ -278,12 +292,19 @@ media keys). Handing over the raw socket is exactly the escape hatch we refuse.
 **The deliverable is a runnable binary** — a normal program you invoke, not a
 Nix module set. Both run-modes are surfaces of that one binary.
 
+The CLI factors into three verbs — `wrap` (argv-first), `run <spec>`, and
+`resolve` (freeze a spec) — each a tap at a different pipeline layer; see
+[execution-modes.md](execution-modes.md) for the full model. The two run-modes
+below are the endpoints those verbs serve.
+
 ### Wrap mode (CLI) — the primary surface
 
-`pierogi run [flags] -- <binary|store-path> [args...]`
+`pierogi wrap [flags] -- <binary|store-path> [args...]`
 
-- Generates the spec in memory from strict defaults + a small set of flags;
-  synthesizes `/etc` and assembles the rootfs view live.
+- Synthesizes the spec in memory from strict defaults + a small set of flags;
+  synthesizes `/etc` and assembles the rootfs view live. `wrap --dry-run` prints
+  that spec *unresolved* instead of running — the editable starting point for a
+  hand-authored config.
 - Defaults: read-only root, all namespaces, id mapping on, deny-all D-Bus,
   synthetic `/etc`, no network unless `--net`.
 - Flags tighten or make narrow, explicit exposures — there is intentionally no
@@ -296,10 +317,12 @@ Nix module set. Both run-modes are surfaces of that one binary.
 
 - Points the engine at a store path holding a `spec` file + a `rootfs` symlink
   (see [Spec & rootfs](#spec--rootfs-build-time-vs-runtime)). The engine reads
-  and drives; almost no preparation work.
+  and drives; almost no preparation work — the `spec` already carries its baked
+  `closure:`, so no runtime query runs.
 - How those store paths get *built* is, for now, just "some Nix expression that
-  writes a spec (via `pierogi synth-etc` for the baked `/etc`) and links a
-  closure." A minimal builder helper is enough.
+  writes a spec (via `pierogi synth-etc` for the baked `/etc` and `pierogi
+  resolve` to bake the `closure:`) and links a closure." A minimal builder helper
+  is enough.
 
 ### Config layer (Nix modules) — DEFERRED / OPEN
 
@@ -316,24 +339,34 @@ it is shaped by real usage rather than guessed up front.
 
 ## Runtime backend abstraction
 
-The backend sits behind a narrow internal trait — roughly `create(oci_spec) ->
-Handle`, `start(Handle)`, `wait/kill/teardown` — so youki and libcrun are
-swappable and we're not married to either:
+The backend sits behind a narrow internal trait — roughly `create(spec) ->
+Handle`, `start(Handle)`, `wait/kill/teardown` — so backends are swappable and
+we're not married to any. Candidates, choice deferred to the tech-choices
+comparison:
 
-- **youki `libcontainer`** (primary): pure Rust, in-process, no FFI, builds
-  from `oci-spec` types we already hold in memory. Best ergonomic + safety fit.
-- **libcrun** (fallback): mature C implementation, broadest feature coverage;
-  reached via a thin FFI shim if we hit a youki gap. Still driven in-memory —
-  we populate crun's config struct, not a `config.json`.
+- **libcrun**: mature C, broadest feature coverage; reached via a thin FFI shim,
+  driven in-memory (we populate crun's config struct, not a `config.json`).
+  Fastest measured backend today (~11.5 ms).
+- **youki `libcontainer`**: pure Rust, in-process, no FFI, builds from
+  `oci-spec` types we already hold in memory. Best ergonomic + safety fit, but
+  measured ~4× slower (~45 ms).
+- **Leaner / hand-rolled or `bwrap`-style**: on the table if it clears the
+  security bar (second principle). Trades coverage + hardening for startup and
+  closure size.
 
-The spec → OCI-spec translation is the only backend-aware code; keeping it
-isolated is what makes the swap cheap and the core auditable.
+The trait is written around an OCI spec today because both leading candidates
+consume one; a non-OCI backend (bwrap, hand-rolled) would push the trait
+boundary *above* `oci_spec` to a pierogi-native shape. The spec → backend
+translation is the only backend-aware code — keeping it isolated is what makes
+the swap cheap and the core auditable.
 
 ## What the Engine deliberately does NOT do
 
-- **No reimplementing low-level container mechanics.** namespaces, cgroups,
-  `pivot_root`, seccomp load, and `exec` are the embedded runtime's job, not
-  ours.
+- **No reimplementing low-level container mechanics *today*.** namespaces,
+  cgroups, `pivot_root`, seccomp load, and `exec` are delegated to the embedded
+  runtime — a security-cost decision, not a permanent refusal. If a hand-rolled
+  path can meet the security bar it's back on the table (see the runtime
+  discussion above).
 - **No OCI bundle on disk, no runtime CLI.** We build the OCI spec in memory and
   drive the runtime as a library — no `config.json`, no `crun run`/`youki run`
   subprocess.

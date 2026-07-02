@@ -2,7 +2,7 @@
 
 A fast, Nix-native sandbox runtime — between `bubblewrap` and `docker`. See
 [`docs/`](docs/) for the [vision](docs/vision.md), [architecture](docs/architecture.md),
-and [roadmap](docs/roadmap.md).
+[execution modes](docs/execution-modes.md), and [roadmap](docs/roadmap.md).
 
 ## Status: M0 — shell-run spike ✅ working
 
@@ -56,6 +56,6 @@ point is *a namespaced shell launched from Rust*.
 ```
 crates/pierogi-engine/   # closure calc, spec build, runtime driving
 crates/pierogi-cli/      # `pierogi` binary (clap)
-docs/                    # vision / architecture / roadmap
+docs/                    # vision / architecture / execution-modes / roadmap
 flake.nix .envrc         # dev shell: rust toolchain + libseccomp + nix
 ```

@@ -71,11 +71,15 @@ strict-by-default wrap mode.
 - [ ] Capability drop to empty set + `noNewPrivileges`.
 - [ ] A baseline seccomp profile in the OCI spec (permissive-ish; tighten in M2).
 - [ ] Clean Pierogi-side teardown on failure (staging dir).
-- [ ] `pierogi run --dry-run -- bash` prints the OCI spec it *would* hand the
-      runtime.
+- [ ] Split the single spike `run` verb into `wrap` (argv-first), `run` (takes a
+      spec), and `resolve` (spec → spec + baked `closure:`). See
+      [execution-modes.md](execution-modes.md).
+- [ ] `pierogi wrap --dry-run -- bash` prints the *unresolved* pierogi spec it
+      synthesized — the editable starting point, **not** an OCI dump (no path
+      emits OCI). `pierogi resolve <spec>` prints that spec with `closure:` baked.
 
 **Acceptance:**
-- `pierogi run -- bash` gives an interactive shell where:
+- `pierogi wrap -- bash` gives an interactive shell where:
   - `id` shows the mapped uid; `cat /etc/hostname` shows the synthetic name.
   - `/` is read-only (`touch /foo` fails); `/tmp` is writable.
   - host `/etc/passwd`, host `/home`, host `/proc/1` are **not** visible.
@@ -121,8 +125,9 @@ to consume a prebuilt `{spec, rootfs}` store path, plus a minimal builder.
 shape, parity between the two run-modes.
 
 - [ ] `pierogi run /nix/store/…-sandbox` reads `./spec` + resolves `./rootfs`.
-- [ ] A minimal Nix builder helper: write the spec, call `pierogi synth-etc` to
-      bake `/etc` into the rootfs closure, link it. No options schema yet.
+- [ ] A minimal Nix builder helper: author the spec, call `pierogi synth-etc` to
+      bake `/etc`, and `pierogi resolve` to bake `closure:` (the sealed fast-path
+      — no runtime query); link the rootfs. No options schema yet.
 - [ ] Confirm a nix-mode sandbox and the wrap-mode equivalent behave identically
       (same engine path past "obtain spec & rootfs").
 
