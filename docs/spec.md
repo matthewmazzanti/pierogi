@@ -52,16 +52,20 @@ enum Mount {
 
     // writable scratch; no source.
     Tmpfs { dest: PathBuf },
+
+    // writable view over a store path: FOLD the lower's closure (like Store),
+    // present a RW merge at `dest`. upper: None -> ephemeral tmpfs; Some(dir) -> persistent host dir.
+    Overlay { source: StorePath, dest: PathBuf, upper: Option<PathBuf> },
 }
 ```
 
 `#[serde(tag = "type", rename_all = "lowercase")]` gives an internally-tagged
 JSON form: a `"type"` discriminator plus that variant's fields, flat. Field names
 are uniform — `source → dest` everywhere (`dest` optional only for `Store`,
-absent for `Tmpfs`). The fold-vs-no-fold decision is **not** echoed in the field
-names (that would be redundant); it lives in the `type` tag and in the Rust type
-of `source` (`StorePath` folds, `PathBuf` is opaque). See
-[JSON serialization](#json-serialization) for the concrete shapes.
+absent for `Tmpfs`; `Overlay` adds a writable `upper`). The fold-vs-no-fold
+decision is **not** echoed in the field names (that would be redundant); it lives
+in the `type` tag and in the Rust type of `source` (`StorePath` folds, `PathBuf`
+is opaque). See [JSON serialization](#json-serialization) for the concrete shapes.
 
 ### Fields
 
@@ -103,7 +107,7 @@ of `source` (`StorePath` folds, `PathBuf` is opaque). See
 
 ## The `Mount` model
 
-The three variants are **not** distinguished by where the source lives — they're
+The variants are **not** distinguished by where the source lives — they're
 distinguished by **whether the closure folds**. Source location is orthogonal.
 Pull a mount apart into its real properties:
 
@@ -120,6 +124,7 @@ Only #3 is load-bearing, and it's a **choice, not an inference** from the source
 | `Store { source, dest }` | store path (required) | **yes** | identity (`dest` omitted) or relocate to `dest` |
 | `Host { source, dest, rw }` | anything, incl. `/nix/store` | **no** | required `dest` (ro unless `rw`) |
 | `Tmpfs { dest }` | none | n/a | required `dest` |
+| `Overlay { source, dest, upper }` | store path (required) | **yes** | RW merge at `dest` (writable via `upper`) |
 
 - **`Store` = "place the path *and* fold its dependencies."** What makes the
   store symlinks *inside* the path resolve is its **dependencies**
@@ -143,6 +148,16 @@ Only #3 is load-bearing, and it's a **choice, not an inference** from the source
   `/nix/store` with its closure. Inner store symlinks dangle, on purpose — a
   narrowing posture (expose these bytes, keep `/nix/store` minimal). Read-only by
   default (strict-by-default); `rw: true` is the explicit opt-in to writability.
+- **`Overlay` = "a `Store` mount, but writable."** Folds the lower's closure like
+  `Store` (its store symlinks resolve for free), then presents a **read-write
+  merge** at `dest` via an overlay upper. `upper` omitted → ephemeral tmpfs
+  (writes discarded on teardown); `upper: <host dir>` → persistent. The store
+  `source` stays immutable — writes land in the upper, never the lower. Unlike a
+  relocated `Store`, the lower is read from its *identity* `/nix/store/…` location
+  (no self-ref subtlety); only the merged view moves to `dest`. This is the answer
+  to "edit code at a path" (the writable-mounts TODO). Realizes as one OCI
+  `type: overlay` mount; needs kernel ≥ 5.11 for unprivileged overlayfs-in-userns
+  (else a `fuse-overlayfs` fallback).
 - **Why not infer fold-from-source.** Auto-folding on any `/nix/store` source
   would make closure-dragging *implicit* (bind one dir, silently gain 200
   transitive paths) — against the "everything is written down" ethos — and would
@@ -154,6 +169,16 @@ unrepresentable: no "fold a host path," no "fold a tmpfs," no "store bind with a
 custom `rw`." The one asymmetry — `Store`'s `dest` is optional, `Host`'s is
 required — is correct: a host path has no identity in the sandbox.
 
+**Fold is a property of a store-path *reference*, not of the mount *type*.** A
+single-source bind hides this (its one `source` carries the whole decision), but
+`Overlay` — and any future type that names paths beyond one source — makes it
+explicit. So closure seeds are collected uniformly, per variant: `Store` and
+`Overlay` each contribute their `source`; `Host`/`Tmpfs` contribute none. If
+`Overlay` ever generalizes to **multiple, independently-tagged lowers**
+(`lowers: Vec<Source>` where `Source = Store | Host`), only the seed-collection
+walk widens — the resolver, query, and dedup are unchanged. Deferred; v0 is the
+single store `source`.
+
 ## Resolution invariant
 
 `resolve()` turns a spec with `closure: None` into one with `closure: Some`. The
@@ -161,8 +186,11 @@ closure has exactly **two declared seeds** — nothing is inferred from the comm
 line:
 
 ```
-closure = closure_of(root) ∪ ⋃ closure_of(store mount .path)
+closure = closure_of(root) ∪ ⋃ closure_of(seed)   for seed in mount.store_refs()
 ```
+
+where `store_refs()` is the store-path references a mount contributes: `Store`
+and `Overlay` each give their `source`; `Host` and `Tmpfs` give nothing.
 
 - `Host` and `Tmpfs` mounts contribute **nothing** to the closure — they're
   realized as direct engine mounts.
@@ -188,6 +216,10 @@ and the mount-cost taxonomy.
   seed). The scaffold must pre-create `dest`'s mountpoint dir (generalizes the
   existing "make `/nix/store`, `/tmp`" step).
 - `Host` / `Tmpfs` → direct engine mounts.
+- `Overlay` → the lower's deps stay identity-bound under `/nix/store` (in the
+  closure); one OCI `type: overlay` mount at `dest` with `lowerdir` = the store
+  `source`, `upperdir`/`workdir` = the provisioned writable backing (`upper`, or a
+  tmpfs when omitted). Emitted *after* the closure binds so `lowerdir` exists.
 - `exec` → `process.args` (with the resolved absolute path as `argv[0]`).
 - `env` → `process.env`, verbatim.
 - OCI `root.path` is the **empty scaffold**, not `root` — `root` lives in the
@@ -207,7 +239,14 @@ fake hashes for readability.
 { "type": "host",  "source": "/etc/resolv.conf", "dest": "/etc/resolv.conf" }
 { "type": "host",  "source": "/data", "dest": "/data", "rw": true }
 { "type": "tmpfs", "dest": "/tmp" }
+{ "type": "overlay", "source": "/nix/store/cccc-myproject", "dest": "/home/dev/project" }
+{ "type": "overlay", "source": "/nix/store/cccc-myproject", "dest": "/home/dev/project", "upper": "/var/lib/pierogi/project" }
 ```
+
+The two `overlay` forms are ephemeral (writes discarded on teardown) and
+persistent (writes land in the host `upper` dir). The multi-lower generalization
+(`"lowers": [{ "type": "store", … }, { "type": "host", … }]`) is deferred — v0 is
+the single store `source` above.
 
 **Unresolved spec** (a hand-authored config, or `wrap --dry-run` output) — no
 `closure` key, so `run`/`resolve` will compute it live:
@@ -318,18 +357,16 @@ Each walks `resolve()` on the spec above's building blocks. `closure_of` is one
 
 ## Open / deferred
 
-- **DECIDED — closure carries an input stamp** (`{ from, paths }`) and
-  **placement is `Option<dest>`, not a `StoreAt` variant.** Both folded into the
-  schema above.
-- **TODO — writable mounts via overlay.** All store binds are read-only (immutable
-  store). "Edit code at `/home/dev/project`" is expressible **as an OCI `overlay`
-  mount** (a standard mount type the engine just emits): `lowerdir` = the store
-  path (RO), `upperdir` = a writable backing dir, `workdir` = scratch — so it
-  slots into `Mount` as an `Overlay` variant that folds the lower's closure like a
-  `Store` mount. Open sub-questions: (a) schema shape for the upper backing
-  (ephemeral tmpfs vs persistent host dir); (b) the userns/kernel path —
+- **DECIDED — closure carries an input stamp** (`{ from, paths }`), **placement is
+  `Option<dest>`** (not a `StoreAt` variant), and **writable mounts are an
+  `Overlay` variant** (`{ source, dest, upper }`, `upper` omitted = ephemeral
+  tmpfs). All folded into the schema above.
+- **TODO — overlay's operational path & generalization.** The v0 shape (single
+  store `source`) is specified; still open: (a) the userns/kernel path —
   unprivileged overlayfs-in-userns needs kernel ≥ 5.11, else a `fuse-overlayfs`
-  fallback. Not "is it possible" — it is.
+  fallback; (b) tmpfs-upper sizing/limits; (c) the multi-lower generalization
+  (`lowers: Vec<Source>`, `Source = Store | Host`) — additive when it lands, only
+  the seed-collection walk widens.
 - **TODO — `/etc` and synthetic identity.** Moved out of the spec into the
   **root build** (not a spec field per-se). Still open: the static-vs-dynamic
   split (passwd/group/nsswitch baked into root vs resolv.conf/machine-id
