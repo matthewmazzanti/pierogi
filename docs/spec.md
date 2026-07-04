@@ -74,7 +74,12 @@ of `source` (`StorePath` folds, `PathBuf` is opaque). See
   below.
 - **`env`** — producer-filled key/values. `PATH` lives here and is the single
   source of truth for `exec` lookup. The engine merges nothing; an absent `PATH`
-  is just absent (the producer's responsibility).
+  is just absent (the producer's responsibility). **`PATH` is an upper-layer
+  (bridge / producer) concern only** — mounts never auto-extend it. A store mount
+  folds the closure but contributes *nothing* to `PATH`; auto-pulling mount
+  `bin/` dirs onto `PATH` was considered and rejected as unhelpful (it couples
+  filesystem exposure to executable resolution, which the producer should decide
+  deliberately). If you mount a tool, you put its `bin/` on `PATH` yourself.
 - **`closure`** — the memoized resolution output: the store paths to bind.
   **Present** ⇒ engine-ready, resolution already happened, no Nix query.
   **Absent** ⇒ `resolve()` computes it. This is the production form of the
