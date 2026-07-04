@@ -27,7 +27,12 @@ struct Spec {
     root:    StorePath,                 // required base: closure seed + PATH base
     mounts:  Vec<Mount>,                // additive binds
     env:     BTreeMap<String, String>,  // producer-filled; PATH lives here
-    closure: Option<Vec<StorePath>>,    // resolved bind set; None => resolve() fills it
+    closure: Option<Resolved>,          // resolved bind set + input stamp; None => resolve() fills it
+}
+
+struct Resolved {
+    from:  Vec<StorePath>,              // input stamp: the seeds (root + store-mount sources)
+    paths: Vec<StorePath>,              // the identity-bind set (may omit relocated seeds)
 }
 
 struct Exec {
@@ -80,13 +85,21 @@ of `source` (`StorePath` folds, `PathBuf` is opaque). See
   `bin/` dirs onto `PATH` was considered and rejected as unhelpful (it couples
   filesystem exposure to executable resolution, which the producer should decide
   deliberately). If you mount a tool, you put its `bin/` on `PATH` yourself.
-- **`closure`** — the memoized resolution output: the store paths to bind.
+- **`closure`** — the memoized resolution output, **`{ from, paths }`**.
   **Present** ⇒ engine-ready, resolution already happened, no Nix query.
   **Absent** ⇒ `resolve()` computes it. This is the production form of the
   `PIEROGI_CLOSURE` bench stub in `src/closure.rs`; reuse its validation (all
-  under `/nix/store`, non-empty, fail loud). Shown below as the input-stamped
-  `{ from, paths }` (the leaning-yes TODO); pre-stamp it's a flat `Vec<StorePath>`
-  of just the `paths`.
+  under `/nix/store`, non-empty, fail loud).
+  - **`paths`** — the flat identity-bind set (what actually gets bound). May omit
+    a relocated store-mount source that nothing references (`from ⊋ paths`).
+  - **`from`** — the input stamp: the seeds this closure was resolved from (`root`
+    + store-mount sources). Since store paths are content hashes, `from` is a
+    complete, query-free fingerprint: `from == current seeds` is a set comparison,
+    not a `nix-store` query — cheap drift detection, and the query-free half of
+    the `closure == resolve(root)` provenance assertion. It's a **mechanism only**
+    — what a `from` ≠ declared-seeds divergence *means* (error / warn / allowed
+    seal-override) is the separate [sealed-vs-delta](execution-modes.md#open--deferred)
+    policy.
 
 ## The `Mount` model
 
@@ -305,25 +318,18 @@ Each walks `resolve()` on the spec above's building blocks. `closure_of` is one
 
 ## Open / deferred
 
-- **TODO — stamp the closure with its input seeds (leaning yes).** Make `closure`
-  carry both the requisites and the seeds it was resolved *from* (`{ from: [root ∪
-  store-mount paths], paths: [...] }`). Because store paths are
-  content hashes and a store closure is immutable, the seed list is a complete,
-  query-free stamp: `from == current seeds` is a set comparison, not a `nix-store`
-  query — cheap drift detection, and the query-free half of the `closure ==
-  resolve(root)` provenance assertion in
-  [execution-modes.md](execution-modes.md#closure--memoized-resolution). Marginal
-  value over the `run`-overrides recompute rule is catching *hand-edited* drift
-  (edit `root`, forget to re-resolve). It is a **mechanism only** — what a
-  `from` ≠ declared-seeds divergence *means* (error / warn / allowed
-  seal-override) is the deferred sealed-vs-delta policy, not settled by adding the
-  stamp.
-- **TODO — `Option<dest>` vs a `StoreAt { source, dest }` variant.** Leaning `Option`
-  (the only difference is placement); a separate variant duplicates the
-  closure-folding semantics for no gain.
-- **TODO — writable / overlay mounts.** All store binds are read-only (immutable
-  store). "Edit code at `/home/whatever/code`" needs overlay/copy semantics — a
-  separate feature, deferred.
+- **DECIDED — closure carries an input stamp** (`{ from, paths }`) and
+  **placement is `Option<dest>`, not a `StoreAt` variant.** Both folded into the
+  schema above.
+- **TODO — writable mounts via overlay.** All store binds are read-only (immutable
+  store). "Edit code at `/home/dev/project`" is expressible **as an OCI `overlay`
+  mount** (a standard mount type the engine just emits): `lowerdir` = the store
+  path (RO), `upperdir` = a writable backing dir, `workdir` = scratch — so it
+  slots into `Mount` as an `Overlay` variant that folds the lower's closure like a
+  `Store` mount. Open sub-questions: (a) schema shape for the upper backing
+  (ephemeral tmpfs vs persistent host dir); (b) the userns/kernel path —
+  unprivileged overlayfs-in-userns needs kernel ≥ 5.11, else a `fuse-overlayfs`
+  fallback. Not "is it possible" — it is.
 - **TODO — `/etc` and synthetic identity.** Moved out of the spec into the
   **root build** (not a spec field per-se). Still open: the static-vs-dynamic
   split (passwd/group/nsswitch baked into root vs resolv.conf/machine-id
