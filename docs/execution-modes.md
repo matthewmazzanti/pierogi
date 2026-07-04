@@ -95,9 +95,9 @@ run modes are one `Config` at different stages, not three schemas:
 | | `pierogi wrap` | `pierogi run <config>` | `pierogi run <store-path>` |
 |---|---|---|---|
 | Provenance | **synthesized** from argv+defaults | **authored** by hand | **frozen** (resolve output stapled on) |
-| `root` | none → exe-derived | declared | declared (kept for audit) |
+| `root` | injected base | declared | declared (kept for audit) |
 | `closure:` key | absent | absent | **present** |
-| Resolution | live query, scan=argv[0] (+`--auto`) | live query, scan=declared | **short-circuit — no query** |
+| Resolution | live query, scan=declared (+`--auto`) | live query, scan=declared | **short-circuit — no query** |
 | Reproducible? | no (tracks host store) | contents declared, resolved live | **fully sealed** |
 | Speed | pays the query | pays the query | **fast-path, no query** |
 | Position | ◄ just works | ── middle ── | works consistently ► |
@@ -115,16 +115,20 @@ build just runs resolve early (via `pierogi resolve`).
 ## Resolution rules
 
 Today `src/run.rs` fuses "what to exec" and "what the rootfs is" into
-`argv[0] → closure → rootfs`. The core of this design is **splitting that**: the
-rootfs source and the exec target are resolved separately.
+`argv[0] → closure → rootfs`. The core of this design is **splitting them**: the
+closure comes from **declared sources only** (`root` + store mounts); the exec
+target is *resolved against* that closure, never a source for it. There is no
+exe-derived closure — `argv[0]` is looked up, not scanned.
 
-1. **`root` declared** → rootfs = `closure(root)`; PATH from the root's bin dirs;
-   `argv[0]` resolved **within** that closure and an **error if absent**. The root
-   closure is fixed by the declaration — exec does not expand it. (Docker
-   semantics; maximally auditable.)
-2. **`root` absent** → rootfs = `closure(argv[0])`; PATH = the target's bin dir.
-   Today's exe-derived behavior, unchanged — the `wrap` fallback.
-3. **mounts** layer additively onto either, taxonomized by closure cost:
+The closure has exactly two seeds, both declared:
+
+1. **`root`** (required) → the base closure seed: `closure(root)`, with PATH from
+   its bin dirs. `argv[0]` is resolved **within** the closure and is an **error if
+   absent** — exec never expands the closure (Docker semantics; maximally
+   auditable). This holds in *every* mode; there is no exe-derived fallback and no
+   `root: absent` case.
+2. **store mounts** → additive seeds, each dragging its own closure, unioned onto
+   root's. The full mount taxonomy by closure cost:
 
 | Mount kind | Has closure? | Query? |
 |---|---|---|
@@ -132,6 +136,9 @@ rootfs source and the exec target are resolved separately.
 | tmpfs / state | no | never — writable scratch |
 | store-path, declared at build | yes | no — folded into the resolved set |
 | store-path, added at runtime | yes | **yes — the only query trigger** |
+
+`closure = closure_of(root) ∪ ⋃ closure_of(store mount)` — nothing is inferred
+from the command line. (`--auto` is the sole, opt-in exception; see below.)
 
 ## `closure:` — memoized resolution
 
@@ -163,13 +170,14 @@ so neither has to be a silent default:
 
 | Scope | What gets closure-expanded | Mode |
 |---|---|---|
-| static-only | just `closure:` / declared store mounts — **no query** | sealed / fast-path |
-| argv[0] | + the executable's closure | **always-on baseline** (the wrap promise) |
-| `--auto` | + every cli arg / mount source that resolves into the store | discovered |
+| declared | `root` + declared store mounts (+ `closure:` if present) — no inference | default — fully auditable |
+| `--auto` | + every cli arg (**incl. `argv[0]`**) / mount source that resolves into the store, folded in as a store mount | discovered |
 
-- argv[0] resolution is the irreducible wrap promise; `--auto` widens the net
-  *past* it. A boolean suffices to start; it can grade later
-  (`--auto=args`, `--auto=args+mounts`).
+- With exe-derivation dropped, **`argv[0]` is no longer a privileged closure
+  seed** — it's found in the declared closure or it errors. `--auto` is the *only*
+  way the command line feeds the closure, and it treats `argv[0]` like any other
+  arg: if it resolves into the store, fold it in as a store mount. A boolean
+  suffices to start; it can grade later (`--auto=args`, `--auto=args+mounts`).
 - **Scan predicate:** an arg is discoverable iff it canonicalizes to a path under
   `/nix/store/` (reuse `store_root` / `canonicalize` from `src/closure.rs`).
   Non-store args ignored.
@@ -210,9 +218,9 @@ recompute; runtime-only overrides just rewrite.**
 | Override | Closure cost? | Effect |
 |---|---|---|
 | `--env`, `--hostname`, `--net`, `--cwd` | none | rewrite spec field |
-| `--exec` / argv, argv[0] **within** the closure | none | rewrite exec (Docker-within-root) |
+| `--exec` / argv | none | rewrite exec — **within** the closure (Docker-within-root), else **error** |
 | `--mount host:/x`, tmpfs, state | none | layer on |
-| `--mount store:/…` (or exec **outside** the closure) | **yes** | **delta recompute** over the existing set |
+| `--mount store:/…` | **yes** | **delta recompute** over the existing set |
 
 Seal interaction: when `<spec>` is pre-baked (`closure:`) and an override adds a
 store path, that is the exact — and only — point where the seal breaks, gated by
@@ -221,8 +229,10 @@ will eventually be answered.
 
 ## Roadmap fit
 
-- **`wrap` / exe-derived** exists today (M0/M1); rule 2 is the current code
-  relocated into the bridge.
+- **`wrap`** exists today (M0/M1) in an exe-derived form; the redesign relocates
+  it into the bridge and swaps exe-derivation for a **baked base `root`** (exe
+  resolved within it). The old derive-from-`argv[0]` path survives only behind
+  `--auto`.
 - **dynamic config** is the new middle: needs the `Config` schema + file loader +
   the authored bridge path. Lands with M1's spec work.
 - **pre-baked** is M3 — cheap once dynamic config + `resolve()` exist (it is just
