@@ -97,15 +97,15 @@ run modes are one `Config` at different stages, not three schemas:
 | Provenance | **synthesized** from argv+defaults | **authored** by hand | **frozen** (resolve output stapled on) |
 | `root` | injected base | declared | declared (kept for audit) |
 | `closure:` key | absent | absent | **present** |
-| Resolution | live query, scan=declared (+`--auto`) | live query, scan=declared | **short-circuit — no query** |
+| Resolution | live query over declared seeds | live query over declared seeds | **short-circuit — no query** |
 | Reproducible? | no (tracks host store) | contents declared, resolved live | **fully sealed** |
 | Speed | pays the query | pays the query | **fast-path, no query** |
 | Position | ◄ just works | ── middle ── | works consistently ► |
 
-The three modes are ergonomic **bundles** of three underlying axes — *provenance*
-× *resolution time* (live/sealed) × *scan scope* — not walls. Off-menu
-combinations are legal: an **authored config carrying a `closure:` key** is a
-"sealed dynamic config" — hand-frozen reproducibility with no Nix involved.
+The three modes are ergonomic **bundles** of two underlying axes — *provenance*
+× *resolution time* (live/sealed) — not walls. Off-menu combinations are legal:
+an **authored config carrying a `closure:` key** is a "sealed dynamic config" —
+hand-frozen reproducibility with no Nix involved.
 
 `pre-baked = dynamic config, frozen`: the Nix builder is literally "run the
 bridge + resolve() on a dynamic config, then serialize the result with `closure:`
@@ -138,7 +138,7 @@ The closure has exactly two seeds, both declared:
 | store-path, added at runtime | yes | **yes — the only query trigger** |
 
 `closure = closure_of(root) ∪ ⋃ closure_of(store mount)` — nothing is inferred
-from the command line. (`--auto` is the sole, opt-in exception; see below.)
+from the command line (see [Declared-only closure](#declared-only-closure-no-discovery)).
 
 ## `closure:` — memoized resolution
 
@@ -161,35 +161,22 @@ idea. Both set the no-query flag; the choice between them is the mount-count
 lever (see startup-performance.md, lever 6) and lives entirely behind the
 `{spec, rootfs}` boundary. Per-path binds for now.
 
-## `--auto`: declared vs discovered
+## Declared-only closure (no discovery)
 
-The real tension is **declared** (everything the sandbox sees is written
-down → auditable, reproducible) vs **discovered** (the tool infers closure from
-what you *mention* → convenient, occasionally surprising). `--auto` is the dial,
-so neither has to be a silent default:
+The closure is **exactly what's declared** — `root` + store mounts (+ `closure:`
+if present). Nothing is inferred from `argv`, program arguments, or mount
+*values*. This is the whole "everything the sandbox sees is written down" property:
+the visible store is a function of the spec, not of what a command happened to
+mention.
 
-| Scope | What gets closure-expanded | Mode |
-|---|---|---|
-| declared | `root` + declared store mounts (+ `closure:` if present) — no inference | default — fully auditable |
-| `--auto` | + every cli arg (**incl. `argv[0]`**) / mount source that resolves into the store, folded in as a store mount | discovered |
-
-- With exe-derivation dropped, **`argv[0]` is no longer a privileged closure
-  seed** — it's found in the declared closure or it errors. `--auto` is the *only*
-  way the command line feeds the closure, and it treats `argv[0]` like any other
-  arg: if it resolves into the store, fold it in as a store mount. A boolean
-  suffices to start; it can grade later (`--auto=args`, `--auto=args+mounts`).
-- **Scan predicate:** an arg is discoverable iff it canonicalizes to a path under
-  `/nix/store/` (reuse `store_root` / `canonicalize` from `src/closure.rs`).
-  Non-store args ignored.
-- `--auto` is a heuristic, and that is *why* it is opt-in: it can't be complete
-  (a `dlopen`ed store path never on the command line is missed), and it lets
-  program arguments widen the visible store — a mild surface a hardened/pre-baked
-  sandbox should not have. The declared path is the one you trust.
-- Needs a `Config` representation, not just a flag (`resolve: { scan: declared |
-  auto }`), so the one-schema property holds; `--auto` is CLI sugar over it.
-
-`closure:` and `--auto` are orthogonal: `closure:` memoizes the *declared*
-portion; `--auto` governs whether the *discovered* portion is pulled on top.
+A **discovered** mode (`--auto`: scan cli args / mount sources that resolve into
+`/nix/store` and fold each in as a store mount) was considered as a "just works"
+convenience and **dropped for this layer for now.** With exe-derivation already
+gone and the declared model covering the real cases, it earns nothing: it couples
+argument *values* to the visible store (a surface a hardened sandbox shouldn't
+have), it can't be complete anyway (a `dlopen`ed store path never on the command
+line is missed), and it reintroduces the command-line inference the argv[0]-drop
+removed. Parked — revisit only if declared-only proves too rigid in practice.
 
 ## `wrap`'s default base rootfs — baked, with a live opt-in
 
@@ -204,7 +191,7 @@ portion; `--auto` governs whether the *discovered* portion is pulled on top.
   base. This turns the "just works" verb into a fast path.
 - **`--base <profile|pkgs>` live opt-in:** bootstrap a base at launch when you
   want to track current nixpkgs, at the cost of a query and needing Nix at
-  runtime. Mirrors the sealed-default / explicit-live pattern used for `--auto`.
+  runtime. The sealed-default / explicit-live split, applied to the base rootfs.
 
 Caveat: baked assumes pierogi was Nix-installed (its runtime closure carries the
 base); `--base` needs Nix available at launch.
@@ -231,8 +218,8 @@ will eventually be answered.
 
 - **`wrap`** exists today (M0/M1) in an exe-derived form; the redesign relocates
   it into the bridge and swaps exe-derivation for a **baked base `root`** (exe
-  resolved within it). The old derive-from-`argv[0]` path survives only behind
-  `--auto`.
+  resolved within it). Exe-derivation is dropped outright — there is no
+  command-line closure discovery.
 - **dynamic config** is the new middle: needs the `Config` schema + file loader +
   the authored bridge path. Lands with M1's spec work.
 - **pre-baked** is M3 — cheap once dynamic config + `resolve()` exist (it is just
@@ -242,8 +229,12 @@ will eventually be answered.
 
 ## Open / deferred
 
-- **Sealed vs delta default** — currently expressed as "did an override / `--auto`
-  ask for it." Whether `--auto` is ever implicit per surface stays open.
-- **Scan-scope grading** — boolean `--auto` now; graded scopes later.
+- **Sealed vs delta default** — with `--auto` dropped, the only way a store path
+  enters a sealed spec at launch is an explicit `--mount store:` override on
+  `run`. The open question narrows to just that: when an override adds a store
+  path to a pre-baked spec, does the seal break silently, warn, or require a flag?
+- **Discovered closure (`--auto`)** — parked, not part of v0 (see [Declared-only
+  closure](#declared-only-closure-no-discovery)); revisit only if declared-only
+  proves too rigid.
 - **Rootfs representation** — per-path binds now; merged tree is the lever-6
   perf question, behind the `{spec, rootfs}` boundary.

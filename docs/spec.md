@@ -307,7 +307,7 @@ Each walks `resolve()` on the spec above's building blocks. `closure_of` is one
 
 - **TODO — stamp the closure with its input seeds (leaning yes).** Make `closure`
   carry both the requisites and the seeds it was resolved *from* (`{ from: [root ∪
-  store-mount paths ∪ --auto discovered], paths: [...] }`). Because store paths are
+  store-mount paths], paths: [...] }`). Because store paths are
   content hashes and a store closure is immutable, the seed list is a complete,
   query-free stamp: `from == current seeds` is a set comparison, not a `nix-store`
   query — cheap drift detection, and the query-free half of the `closure ==
