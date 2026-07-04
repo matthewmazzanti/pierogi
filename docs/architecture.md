@@ -146,9 +146,12 @@ separate, already-materialized thing — *not* a filesystem image manifest):
   The Engine reads `spec`, points the runtime at `rootfs`, and does almost no
   preparation work.
 
-**Format: still open in detail, with one piece now pinned.** The full serialized
-spec schema is deferred until M1 tells us what the engine actually needs. But
-the **synthetic-identity sub-schema is fixed early** because it's the JSON the
+**Format: still open in detail, with one piece now pinned.** The *serialized wire
+format* (JSON vs other, public-contract status) is deferred until M1 tells us what
+the engine actually needs — but the **field-level schema is now a converging
+draft** in [spec.md](spec.md) (`exec` / `root` / `mounts` / `env` / `closure`, the
+`Mount` fold model). The **synthetic-identity sub-schema is fixed early** because
+it's the JSON the
 synthetic builders consume (see next section) — hostname, user (name/uid/gid/
 home), and the list of `/etc` files to emit. Pinning that slice lets both wrap
 mode and the Nix build call the same generator without waiting on the rest.

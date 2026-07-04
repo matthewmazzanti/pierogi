@@ -2,7 +2,8 @@
 
 A fast, Nix-native sandbox runtime — between `bubblewrap` and `docker`. See
 [`docs/`](docs/) for the [vision](docs/vision.md), [architecture](docs/architecture.md),
-[execution modes](docs/execution-modes.md), and [roadmap](docs/roadmap.md).
+[execution modes](docs/execution-modes.md), the [spec](docs/spec.md), and the
+[roadmap](docs/roadmap.md).
 
 ## Status: M0 — shell-run spike ✅ working
 
