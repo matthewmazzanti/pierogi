@@ -72,8 +72,9 @@ cgroup. Setting `force_no_cgroup` (and `no_new_keyring`) in the shim dropped
 crun from ~33 ms → ~20 ms. Almost all of it was **idle time** — the cgroup
 machinery blocking, not computing.
 
-This is the right default *for the spike*. When M2 adds resource limits it
-becomes conditional: skip the cgroup only when the spec declares no limits.
+This is the right default *for the spike*. When M4 (hardening) adds resource
+limits it becomes conditional: skip the cgroup only when the spec declares no
+limits.
 
 ### 3. The memfd self-copy (~8 ms) — free from the store
 

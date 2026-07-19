@@ -13,7 +13,7 @@ The **M0 spike** is proven: we embed the youki `libcontainer` OCI runtime
 `uid=0 pid=1` (userns + pid ns), read-only root, writable `/tmp`,
 `/nix/store` containing exactly the 5-path bash closure, and no host
 `/etc`/`/home` visible. Deliberately crude otherwise — synthetic `/etc` and
-strict defaults are M1.
+strict defaults are M4 (hardening; deferred behind nix-mode + the proxy/GPU work).
 
 ### Build & run
 

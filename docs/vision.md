@@ -36,7 +36,7 @@ These are **emission targets for an already-declared sandbox**, not an internal
 image-build or registry system — that distinction is what keeps them consistent
 with the non-goals below. The first is near-term; the latter two are
 deliberately aspirational and only make sense once the spec/closure model
-(M3+) is solid.
+(M1+, nix-mode) is solid.
 
 ## Goals
 

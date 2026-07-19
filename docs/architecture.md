@@ -397,10 +397,10 @@ whether the in-process runtime embedding actually works the way we hope:
 Deferred to the milestone that forces them:
 
 - Where the proxy supervisor lives once the Engine hands off to the runtime —
-  re-parent to a small supervised helper, or to `systemd`? *(M4)*
+  re-parent to a small supervised helper, or to `systemd`? *(M2 — D-Bus proxy)*
 - Anything the OCI seccomp schema *can't* express that we'd need a
-  `seccompiler`-style custom filter for. *(M2)*
+  `seccompiler`-style custom filter for. *(M4 — hardening)*
 - Cgroup v2 delegation + resource limits: let the runtime manage the cgroup, or
-  delegate entirely to `systemd` slices and tell the runtime to stay out? *(M2)*
+  delegate entirely to `systemd` slices and tell the runtime to stay out? *(M4 — hardening)*
 
 See [roadmap.md](roadmap.md) for milestone detail.

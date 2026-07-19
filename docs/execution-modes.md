@@ -223,14 +223,15 @@ will eventually be answered.
 
 ## Roadmap fit
 
-- **`wrap`** exists today (M0/M1) in an exe-derived form; the redesign relocates
-  it into the bridge and swaps exe-derivation for a **baked base `root`** (exe
-  resolved within it). Exe-derivation is dropped outright — there is no
-  command-line closure discovery.
-- **dynamic config** is the new middle: needs the `Config` schema + file loader +
-  the authored bridge path. Lands with M1's spec work.
-- **pre-baked** is M3 — cheap once dynamic config + `resolve()` exist (it is just
-  resolve-then-freeze).
+- **The typed spec schema + `run` + `resolve`** land in **M1 (nix mode)** — the
+  reproducible core. Both the authored-config (dynamic) and pre-baked forms fall
+  out of the same schema.
+- **pre-baked / nix-mode is M1**: `resolve`-then-freeze over a *supplied* closure
+  (`closureInfo`), no query.
+- **`wrap`** exists today (M0) in an exe-derived form; the redesign relocates it
+  into the bridge and swaps exe-derivation for a **baked base `root`** (exe
+  resolved within it) — dropped outright, no command-line closure discovery. The
+  `wrap` argv front-end lands with hardening (**M4**).
 - The **Nix module layer (M7)** authors one of these (almost certainly emits
   pre-baked).
 
