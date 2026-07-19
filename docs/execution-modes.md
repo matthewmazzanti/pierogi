@@ -41,23 +41,40 @@ short-circuit — which is what keeps the core auditable.
 
 Each verb is a **tap at a pipeline layer** — the same pipeline, stopped at a
 different point. Input type splits cleanly and is what makes one surface a flag
-and another a verb: **argv → `wrap`; a spec → `resolve` / `run`.**
+and another a verb: **ad-hoc input (an exe/argv, or a store path to fold) →
+`wrap`; a spec → `resolve` / `run`.** The wrap family is the **bridge**: it
+*synthesizes* a spec from whatever ad-hoc input it's handed, then feeds the same
+`resolve → spec → engine` tail. `run` and `resolve` only ever consume a spec.
+**The engine runs a spec and nothing else** — the ad-hoc modes are conveniences
+that build one first.
 
 | Verb | Input | Stops after | Emits / does |
 |---|---|---|---|
-| `wrap -- cmd` | argv | engine | runs the process (all layers fused) |
-| `wrap --dry-run -- cmd` | argv | bridge | prints the **unresolved** spec (sources, no `closure:`) |
+| `wrap -- cmd` | exe / argv | engine | find exe → build its closure → run (spec **synthesized**) |
+| `wrap <store-path> -- cmd` | store path | engine | fold the store path as `root`, `PATH` from its `bin/`, run cmd (spec **synthesized**) |
+| `wrap --dry-run …` | ad-hoc | bridge | prints the **unresolved** spec (sources, no `closure:`) |
 | `resolve <spec>` | spec | resolve() | prints the **resolved** spec (**+ `closure:`**) |
 | `run [overrides] <spec>` | spec | engine | runs the spec |
 
-**`pierogi wrap [flags] -- <cmd>`** — the argv-first, zero-config "just works"
-surface. Not a separate engine path: the bridge **synthesizes a spec** from
-`argv` + strict defaults + the default base rootfs, then feeds the same
-`resolve → spec → engine` tail. `wrap --dry-run` stops after the bridge and
-prints that synthesized spec **unresolved** (sources only, no `closure:`) — the
-editable *starting point* for hand-authoring. It is a flag on `wrap` because
-`wrap` owns the argv front-end; `--dry-run` just says "stop after synthesizing,
-don't run."
+**`pierogi wrap [flags] <input> -- <cmd>`** — the ad-hoc, zero-config "just
+works" surface, and the *only* place a store path or a bare exe is turned into a
+sandbox. Two ad-hoc inputs, one behavior: **an exe/argv** (find the exe, build
+its closure) or **a store path to fold** (an arbitrary package / buildEnv /
+profile → `root`, `PATH` from its `bin/`). Either way it's not a separate engine
+path — the bridge **synthesizes a spec** from the input + strict defaults + the
+default base rootfs, then runs the normal tail. `wrap --dry-run` stops after the
+bridge and prints that synthesized spec **unresolved** — the editable *starting
+point* for hand-authoring. (Exact CLI surface for the store-path form lands with
+`wrap` at M4; today only the exe bridge exists, as the temporary `run-argv` —
+the store-path fold isn't built yet.)
+
+> **"Run a store path" is not a `run` mode.** Folding an *arbitrary* store path
+> (a package/env) to run a command in it is ad-hoc → it's a **`wrap`** input, per
+> the row above. The nix-mode "store path" is a different thing: a resolved
+> `spec.json` that merely *lives* in the store — running it is plain
+> **`run <spec>`**, the store-path-ness incidental. So a store path reaches the
+> engine two unrelated ways — folded by `wrap` (ad-hoc), or as a spec file for
+> `run` (pre-baked) — and only the latter is a `run` mode.
 
 **`pierogi resolve <spec>`** — takes an existing pierogi spec and emits it
 **resolved: spec + `closure:`**. This is exactly the resolution step `run` runs
@@ -89,10 +106,12 @@ then run internally.
 ## Config vs Spec: one schema, three provenances
 
 There is a **`Config`** (declarative sources) distinct from the **`Spec`**
-(resolved). The same schema appears at three points along resolution — the three
-run modes are one `Config` at different stages, not three schemas:
+(resolved). The same schema appears at three points along resolution — these
+three **provenances** are one `Config` at different stages, not three schemas
+(and the store-path column is a pre-baked *spec* file in the store, i.e. `run`,
+not the ad-hoc store-path fold that belongs to `wrap`):
 
-| | `pierogi wrap` | `pierogi run <config>` | `pierogi run <store-path>` |
+| | `pierogi wrap` | `pierogi run <config>` | `pierogi run <store-path spec>` |
 |---|---|---|---|
 | Provenance | **synthesized** from argv+defaults | **authored** by hand | **frozen** (resolve output stapled on) |
 | `root` | injected base | declared | declared (kept for audit) |
