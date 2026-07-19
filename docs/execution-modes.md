@@ -107,10 +107,15 @@ The three modes are ergonomic **bundles** of two underlying axes — *provenance
 an **authored config carrying a `closure:` key** is a "sealed dynamic config" —
 hand-frozen reproducibility with no Nix involved.
 
-`pre-baked = dynamic config, frozen`: the Nix builder is literally "run the
-bridge + resolve() on a dynamic config, then serialize the result with `closure:`
-stapled on." So `run <unresolved-spec>` and the build path share a codepath;
-build just runs resolve early (via `pierogi resolve`).
+`pre-baked = dynamic config, frozen`: the Nix builder serializes a resolved
+config with `closure:` stapled on. `run <unresolved-spec>` and the build path
+share the **stamping/serialization** codepath — *not* the query: a build sandbox
+has no daemon socket or Nix DB, so `nix-store --query --requisites` cannot run in
+it. Instead the closure is **supplied** by Nix (`closureInfo` / the reference
+graph — see [Nix-mode closure source](spec.md#nix-mode-closure-source-build-time)),
+and `resolve` there is pure data-shuffling. The `nix-store` query is one
+*pluggable source* of the closure (live wrap on a real host); `closureInfo`
+output and the `PIEROGI_CLOSURE` stub are the others.
 
 ## Resolution rules
 
@@ -145,11 +150,13 @@ from the command line (see [Declared-only closure](#declared-only-closure-no-dis
 `closure:` is not a new source; it is the **cached output** of resolving the
 static sources. Its presence means "resolution already happened — do not re-run
 `closure_of()`." This is the production form of the `PIEROGI_CLOSURE` bench stub
-in `src/closure.rs`: a Nix build knows the closure for free (it *is* what computes
-requisites), so baking it into the emitted `Config` is just not discarding that
-information. Reuse the stub's validation (all under `/nix/store`, non-empty, fail
-loud) so a malformed `closure:` aborts rather than silently falling back to a
-query.
+in `src/closure.rs`. `closure_of()` is a **pluggable source**: a live `nix-store
+--query --requisites` (wrap, on a real host) *or* a supplied list. A Nix build
+takes the supplied path — it knows the closure for free (`closureInfo` / the
+reference graph) and could not query anyway (no daemon in the sandbox), so baking
+it into the emitted `Config` is just not discarding that information. Reuse the
+stub's validation (all under `/nix/store`, non-empty, fail loud) so a malformed
+`closure:` aborts rather than silently falling back to a query.
 
 When both `root` and `closure:` are present, `closure:` drives execution and
 `root` is verifiable provenance — a test can assert `closure == resolve(root)`.

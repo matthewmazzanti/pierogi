@@ -205,6 +205,40 @@ host-side, before the engine touches a namespace. See
 [execution-modes.md](execution-modes.md#resolution-rules) for the full algorithm
 and the mount-cost taxonomy.
 
+`closure_of()` is a **pluggable source**, not always a `nix-store` call:
+
+- **Live (wrap, on a real host):** `nix-store --query --requisites <seeds>` — one
+  deduped call. Needs the daemon / Nix DB.
+- **Nix build (pre-bake):** the build sandbox has **no daemon socket and no Nix
+  DB**, so that query is impossible. Nix already knows the closure and supplies it
+  as data — `resolve` there just stamps it. See below.
+
+## Nix-mode closure source (build time)
+
+In a Nix build the closure is **supplied**, via `closureInfo { rootPaths = seeds
+}` where `seeds` = the spec's declared store paths (`root` + store-mount / overlay
+`source`s). The same Nix expression that emits the spec drives `closureInfo`, so
+they can't disagree. `closureInfo` outputs three files (verified against a real
+closure):
+
+| File | Shape | Maps to |
+|---|---|---|
+| `store-paths` | flat closure, one path/line, deduped, leaves-first | **`closure.paths`** — zero parsing |
+| `registration` | per path: `path / narHash / narSize / deriver / N / N×refs` | the **reference graph** — for self-ref / relocated-seed (`from ⊋ paths`) decisions |
+| `total-nar-size` | single integer (closure bytes) | tmpfs-`upper` sizing / telemetry |
+
+`from` is just the `rootPaths` you passed — not parsed out of anything. A store
+path lists **itself** in its own `registration` refs iff it self-references (a real
+example: `glibc`), which is exactly the self-ref signal.
+
+So the build-time entry is `pierogi resolve --closure <store-paths>` (plus
+`--registration <file>` once the self-ref optimization is implemented): supplied
+closure, no query — the same stamping codepath as a live resolve, different
+source. (`exportReferencesGraph` is the lower-level primitive — graph only, `path
+/ deriver / N / refs`, no hash/size; `closureInfo` is the wrapper. `__structured
+Attrs`'s `.attrs.json` only echoes the requested roots, not an expanded JSON
+graph, so it's no shortcut.)
+
 ## Realization (what the engine does)
 
 - `closure` → one ro bind per path under `/nix/store` (per-path binds today; the
