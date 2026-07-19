@@ -69,9 +69,11 @@ tail, the pluggable (supplied) closure source, the `{spec, rootfs}` store shape.
       launch; and `pierogi run <store-path>` reading `./spec` + `./rootfs`.
 - [ ] `pierogi resolve <spec>` (freeze → bake `closure:`) incl. `resolve
       --closure <store-paths>` for the build-time supplied path.
-- [ ] Minimal Nix builder: `root = buildEnv/pkgs`, `closureInfo { rootPaths =
-      seeds }` → `paths`, emit `spec.json` with `closure: {from, paths}`, produce
-      a `{spec, rootfs}` store path (see
+- [ ] Minimal Nix builder: `root = buildEnv/pkgs` **with a hand-rolled `/etc`**
+      (fixed `passwd`/`group`/`hostname` written as Nix strings, baked into the
+      root — real files, authored by hand, *not* synth-generated), `closureInfo {
+      rootPaths = seeds }` → `paths`, emit `spec.json` with `closure: {from,
+      paths}`, produce a `{spec, rootfs}` store path (see
       [spec.md](spec.md#nix-mode-closure-source-build-time)).
 
 **Acceptance:**
@@ -79,9 +81,12 @@ tail, the pluggable (supplied) closure source, the `{spec, rootfs}` store shape.
   closure with **no `nix-store` query** (closure supplied).
 - `nix build` produces a `{spec, rootfs}` store path that `pierogi run <path>`
   launches into the same shell.
+- inside it, `cat /etc/passwd` shows the **hand-rolled** file baked into the root
+  — proving the baked-`/etc`-in-root path (synth automation is M4).
 
-**Deferred:** synth `/etc` (crude/empty, as M0), strict confinement + id mapping
-(1:1 as M0), seccomp, and the `wrap` argv front-end — all to M4.
+**Deferred:** the `pierogi-synth` builders (M1 hand-rolls `/etc` in Nix instead),
+strict confinement + id mapping (1:1 as M0), seccomp, and the `wrap` argv
+front-end — all to M4.
 
 ---
 
@@ -98,9 +103,8 @@ of the spec, ready-synchronization before `exec`.
 - [ ] Proxy lifecycle tied to sandbox lifecycle (no orphans).
 - [ ] Resolve "where the supervisor lives after the Engine hands off."
 - [ ] Spec `dbus` rules → proxy policy translation + tests.
-- [ ] **Crude `/etc/machine-id`** — the bus requires it. A stub or the single
-      `machine_id()` builder (promoted into full `pierogi-synth` at M4); full
-      synth `/etc` stays deferred.
+- [ ] **`/etc/machine-id`** — the bus requires it; add it to the root's
+      hand-rolled `/etc` (M1's approach). Just one more baked file — no synth yet.
 
 **Acceptance:** a sandboxed app sends a desktop notification *only* because an
 explicit `talk` rule allows it; remove the rule and the call is denied at the
@@ -147,8 +151,9 @@ pipeline, the perf budget, the `wrap` argv front-end.
 
 - [ ] `pierogi-synth` crate: pure builders for `passwd`/`group`/`hostname`/
       `hosts`/`resolv.conf`/`machine-id`/`nsswitch`, consuming the
-      synthetic-identity JSON slice (`serde`). Golden-tested. (Absorbs M2's crude
-      machine-id.)
+      synthetic-identity JSON slice (`serde`). Golden-tested. **Replaces M1/M2's
+      hand-rolled `/etc`** — the bridge from an identity attrset to real files
+      (streamlines authoring, and the same generator serves build *and* runtime).
 - [ ] `pierogi synth-etc <spec.json> <outdir>` (the build-time entrypoint; the
       Nix builder from M1 starts calling it to bake `/etc`).
 - [ ] `pierogi wrap` argv front-end + baked base rootfs + `wrap --dry-run`
@@ -273,9 +278,10 @@ is **interest-and-uncertainty-driven**, a deliberate departure from harden-first
 - **Hardening (M4) is deferred on purpose.** Strict confinement and seccomp are
   well-understood, so they buy little as *proofs* — better to land them once, over
   proven mechanisms, and re-validate the earlier integrations under them.
-- **The cost, accepted consciously:** M1–M3 run on a crude base, so they are
-  *mechanism spikes, not shippable-secure*. "Browser launches" ≠ "browser is
-  confined" until M4. The one hardening bit that can't wait is `/etc/machine-id`
-  (M2's bus needs it), pulled forward as a stub.
+- **The cost, accepted consciously:** M1–M3 run on a crude base (hand-rolled
+  `/etc`, no strict confinement or seccomp), so they are *mechanism spikes, not
+  shippable-secure*. "Browser launches" ≠ "browser is confined" until M4. (D-Bus
+  needs `/etc/machine-id`, but that's just another hand-written file in M1's root
+  `/etc` — no synth pulled forward.)
 - **The config/module layer (M7) is still last and open** — convenience over a
   mechanism that already works, shaped by what M1–M6 actually needed.
