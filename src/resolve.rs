@@ -52,11 +52,12 @@ pub fn resolve(spec: &mut Spec) -> Result<()> {
     // v0: identity-bind the whole closure — no relocated-seed drop yet (that
     // needs the reference graph; the extra binds are always safe). So
     // `paths` = the full closure, `from` = the seeds.
-    let paths = closure_of(&seeds)?
+    let mut paths = closure_of(&seeds)?
         .into_iter()
         .map(StorePath::new)
         .collect::<Result<Vec<_>>>()
         .context("closure contained a non-top-level store path")?;
+    paths.sort();
 
     spec.closure = Some(Resolved { from: seeds, paths });
     Ok(())
@@ -121,11 +122,12 @@ pub fn resolve_supplied(spec: &mut Spec, supplied: Vec<PathBuf>) -> Result<()> {
     if spec.closure.is_some() {
         bail!("spec already carries a closure; refusing to overwrite with --closure");
     }
-    let paths = validate_closure(supplied)?
+    let mut paths = validate_closure(supplied)?
         .into_iter()
         .map(StorePath::new)
         .collect::<Result<Vec<_>>>()
         .context("supplied closure contained a non-top-level store path")?;
+    paths.sort();
     spec.closure = Some(Resolved {
         from: seeds(spec),
         paths,
@@ -191,18 +193,29 @@ mod tests {
                 dest: None,
             }],
         );
+        // Supplied out of order — the stamp must come back canonically sorted
+        // so build-time and live resolves are byte-identical.
         resolve_supplied(
             &mut spec,
             vec![
+                "/nix/store/dddd-dep".into(),
                 "/nix/store/aaaa-root".into(),
                 "/nix/store/bbbb-tool".into(),
-                "/nix/store/dddd-dep".into(),
             ],
         )
         .unwrap();
         let c = spec.closure.as_ref().unwrap();
         assert_eq!(c.from.len(), 2); // the two declared seeds
         assert_eq!(c.paths.len(), 3); // the supplied closure
+        let as_str: Vec<String> = c.paths.iter().map(|p| p.to_string()).collect();
+        assert_eq!(
+            as_str,
+            [
+                "/nix/store/aaaa-root",
+                "/nix/store/bbbb-tool",
+                "/nix/store/dddd-dep"
+            ]
+        );
     }
 
     #[test]

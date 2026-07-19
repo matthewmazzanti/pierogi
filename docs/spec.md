@@ -94,8 +94,13 @@ is opaque). See [JSON serialization](#json-serialization) for the concrete shape
   **Absent** ⇒ `resolve()` computes it. This is the production form of the
   `PIEROGI_CLOSURE` bench stub in `src/closure.rs`; reuse its validation (all
   under `/nix/store`, non-empty, fail loud).
-  - **`paths`** — the flat identity-bind set (what actually gets bound). May omit
-    a relocated store-mount source that nothing references (`from ⊋ paths`).
+  - **`paths`** — the flat identity-bind set (what actually gets bound),
+    **canonically sorted** (lexicographic by store path). Order is cosmetic to
+    the engine (it binds a set), but sorting makes a supplied (build-time) and a
+    live resolve of the same seeds *byte-identical*, so `closure == resolve(root)`
+    is plain equality rather than a set comparison, and the artifact is
+    reproducible regardless of closure source. May omit a relocated store-mount
+    source that nothing references (`from ⊋ paths`).
   - **`from`** — the input stamp: the seeds this closure was resolved from (`root`
     + store-mount sources). Since store paths are content hashes, `from` is a
     complete, query-free fingerprint: `from == current seeds` is a set comparison,
@@ -223,7 +228,7 @@ closure):
 
 | File | Shape | Maps to |
 |---|---|---|
-| `store-paths` | flat closure, one path/line, deduped, leaves-first | **`closure.paths`** — zero parsing |
+| `store-paths` | flat closure, one path/line, deduped, leaves-first | **`closure.paths`** — read line-by-line, re-sorted canonically |
 | `registration` | per path: `path / narHash / narSize / deriver / N / N×refs` | the **reference graph** — for self-ref / relocated-seed (`from ⊋ paths`) decisions |
 | `total-nar-size` | single integer (closure bytes) | tmpfs-`upper` sizing / telemetry |
 

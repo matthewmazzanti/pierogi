@@ -65,9 +65,31 @@
       });
     in
     {
-      packages = forAll (system: {
-        crun-dev = crunDevFor (pkgsFor system);
-      });
+      packages = forAll (system:
+        let
+          pkgs = pkgsFor system;
+          # pierogi itself, default features (youki only) — the nix-mode builder
+          # only needs `resolve`, which drives no runtime backend, so this build
+          # needs no C toolchain / CRUN_DEV / libcrun. Just libseccomp for the
+          # youki path that's compiled in but unused here.
+          pierogi = pkgs.rustPlatform.buildRustPackage {
+            pname = "pierogi";
+            version = "0.0.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = [ pkgs.libseccomp ];
+            LIBSECCOMP_LIB_PATH = "${pkgs.libseccomp.lib}/lib";
+            # tests hit nix-store / namespaces — not build-sandbox friendly.
+            doCheck = false;
+          };
+        in {
+          crun-dev = crunDevFor pkgs;
+          inherit pierogi;
+          # M1 tire-kicker: a self-contained resolved spec.json for a static
+          # bash + coreutils sandbox with a hand-rolled /etc.
+          bash-sandbox = import ./nix/bash-sandbox.nix { inherit pkgs pierogi; };
+        });
 
       devShells = forAll (system:
         let

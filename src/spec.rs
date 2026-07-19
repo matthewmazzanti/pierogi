@@ -100,8 +100,10 @@ pub struct Resolved {
     /// Input stamp: the seeds this closure was resolved from (`root` +
     /// store-mount / overlay sources). A query-free drift fingerprint.
     pub from: Vec<StorePath>,
-    /// The flat identity-bind set (what actually gets bound). May omit a
-    /// relocated store-mount source that nothing references (`from ⊋ paths`).
+    /// The flat identity-bind set (what actually gets bound), **canonically
+    /// sorted** so a supplied (build-time) and a live resolve of the same seeds
+    /// are byte-identical. May omit a relocated store-mount source that nothing
+    /// references (`from ⊋ paths`).
     pub paths: Vec<StorePath>,
 }
 
