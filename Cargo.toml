@@ -22,7 +22,9 @@ libc = "0.2"
 # depends on (^0.9) so the spec types are shared, not two incompatible copies.
 libcontainer = "0.6"
 oci-spec = { version = "0.9", features = ["runtime"] }
-# spec -> JSON string for libcrun's load_from_memory (crun backend).
+# the typed pierogi Spec schema (serde derive) + JSON (also feeds libcrun's
+# load_from_memory on the crun backend).
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

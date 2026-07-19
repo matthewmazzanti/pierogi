@@ -52,7 +52,9 @@ pub fn run(spec: &Spec, id: &str, bundle: &Path, state: &Path) -> Result<i32> {
     };
 
     if !err.is_null() {
-        let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
+        let msg = unsafe { CStr::from_ptr(err) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { libc::free(err as *mut libc::c_void) };
         bail!("libcrun: {msg}");
     }

@@ -783,6 +783,7 @@ dependencies = [
  "libc",
  "libcontainer",
  "oci-spec",
+ "serde",
  "serde_json",
  "tracing-subscriber",
 ]

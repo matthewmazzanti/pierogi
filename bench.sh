@@ -41,4 +41,4 @@ hyperfine \
   --warmup 5 \
   --runs "$RUNS" \
   --parameter-list runtime youki,crun \
-  "$BIN run --runtime={runtime} -- $TARGET"
+  "$BIN run-argv --runtime={runtime} -- $TARGET"

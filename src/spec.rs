@@ -1,134 +1,201 @@
-//! Build the in-memory OCI runtime spec for the spike.
+//! The typed pierogi **Spec** — the v0 schema (see `docs/spec.md`).
 //!
-//! This is the thinnest possible `pierogi-spec -> oci-spec` translation: just
-//! enough to launch a shell in user/mount/pid/uts/ipc namespaces over a
-//! read-only, closure-backed rootfs. The "real" translation grows here in M1.
+//! One descriptive, complete account of a single sandbox: what to run, what
+//! filesystem it sees, its environment, and — once resolved — the exact set of
+//! store paths to bind. It carries **no policy**: the engine is a pure realizer
+//! that binds what the spec says and `exec`s.
+//!
+//! This replaces M0's ad-hoc `SpecInputs`. It is the *pierogi* spec, distinct
+//! from the OCI runtime spec we translate it into (`crate::oci`).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::Result;
-use oci_spec::runtime::{
-    LinuxBuilder, LinuxIdMappingBuilder, LinuxNamespaceBuilder, LinuxNamespaceType, Mount,
-    MountBuilder, ProcessBuilder, RootBuilder, Spec, SpecBuilder, UserBuilder,
-};
+use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 
-/// Inputs the spike needs to assemble a spec.
-pub struct SpecInputs<'a> {
-    /// In-container argv; `argv[0]` is the absolute store path of the binary.
-    pub argv: &'a [String],
-    /// Store paths bound read-only under `/nix/store` (the target's closure).
-    pub closure: &'a [PathBuf],
-    /// Rootfs path, relative to the bundle dir (e.g. `"rootfs"`).
-    pub rootfs_rel: &'a str,
-    /// `PATH` entry inside the container (the target binary's directory).
-    pub bin_dir: &'a str,
-    /// Host uid/gid that container-root (0) maps to.
-    pub uid: u32,
-    pub gid: u32,
-}
+/// A top-level Nix store path (`/nix/store/<hash-name>`).
+///
+/// A newtype so the schema can make "this must be a store path" a property of
+/// the *type* rather than a runtime check scattered across the resolver —
+/// `root` and the `Store`/`Overlay` mount sources are `StorePath`, while a
+/// `Host` source is an opaque `PathBuf`. Validated on construction and on
+/// deserialize: any non-store path is rejected at parse time, fail-loud.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct StorePath(PathBuf);
 
-pub fn build_spec(input: &SpecInputs) -> Result<Spec> {
-    let namespaces = [
-        LinuxNamespaceType::User,
-        LinuxNamespaceType::Mount,
-        LinuxNamespaceType::Pid,
-        LinuxNamespaceType::Uts,
-        LinuxNamespaceType::Ipc,
-    ]
-    .into_iter()
-    .map(|typ| LinuxNamespaceBuilder::default().typ(typ).build())
-    .collect::<Result<Vec<_>, _>>()?;
-
-    // Single 1:1 id mapping (container root -> the invoking user). subuid/subgid
-    // ranges and a fuller mapping come in M1.
-    let uid_map = LinuxIdMappingBuilder::default()
-        .host_id(input.uid)
-        .container_id(0u32)
-        .size(1u32)
-        .build()?;
-    let gid_map = LinuxIdMappingBuilder::default()
-        .host_id(input.gid)
-        .container_id(0u32)
-        .size(1u32)
-        .build()?;
-
-    let linux = LinuxBuilder::default()
-        .namespaces(namespaces)
-        .uid_mappings(vec![uid_map])
-        .gid_mappings(vec![gid_map])
-        .build()?;
-
-    // youki populates /dev's device nodes itself (default_devices + bind in
-    // rootless mode), so we only mount the /dev tmpfs and bind the closure.
-    let mut mounts = base_mounts()?;
-    for path in input.closure {
-        let p = path.to_string_lossy();
-        mounts.push(bind_mount(&p, &p, &["bind", "ro"])?);
+impl StorePath {
+    /// Construct from a path, asserting it is a well-formed top-level store
+    /// path (`/nix/store/<name>`, exactly one component past the store dir).
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let mut comps = path.components().filter_map(|c| match c {
+            std::path::Component::Normal(p) => Some(p),
+            _ => None,
+        });
+        match (comps.next(), comps.next(), comps.next(), comps.next()) {
+            (Some(nix), Some(store), Some(_name), None) if nix == "nix" && store == "store" => {
+                Ok(StorePath(path))
+            }
+            _ => bail!("{} is not a top-level /nix/store path", path.display()),
+        }
     }
 
-    let user = UserBuilder::default().uid(0u32).gid(0u32).build()?;
-    let env = vec![
-        format!("PATH={}", input.bin_dir),
-        "HOME=/".to_string(),
-        "TERM=xterm-256color".to_string(),
-        // Visible marker that you're inside the sandbox.
-        "PS1=pierogi:\\w# ".to_string(),
-    ];
-    let process = ProcessBuilder::default()
-        .terminal(false) // inherit the host stdio (so an interactive tty works)
-        .user(user)
-        .args(input.argv.to_vec())
-        .env(env)
-        .cwd(PathBuf::from("/"))
-        .build()?;
-
-    let root = RootBuilder::default()
-        .path(PathBuf::from(input.rootfs_rel))
-        .readonly(true)
-        .build()?;
-
-    Ok(SpecBuilder::default()
-        .version("1.1.0")
-        .hostname("pierogi")
-        .root(root)
-        .process(process)
-        .mounts(mounts)
-        .linux(linux)
-        .build()?)
+    pub fn as_path(&self) -> &std::path::Path {
+        &self.0
+    }
 }
 
-fn base_mounts() -> Result<Vec<Mount>> {
-    Ok(vec![
-        MountBuilder::default()
-            .destination(PathBuf::from("/proc"))
-            .source(PathBuf::from("proc"))
-            .typ("proc".to_string())
-            .build()?,
-        MountBuilder::default()
-            .destination(PathBuf::from("/dev"))
-            .source(PathBuf::from("tmpfs"))
-            .typ("tmpfs".to_string())
-            .options(vec![
-                "nosuid".into(),
-                "strictatime".into(),
-                "mode=755".into(),
-                "size=65536k".into(),
-            ])
-            .build()?,
-        MountBuilder::default()
-            .destination(PathBuf::from("/tmp"))
-            .source(PathBuf::from("tmpfs"))
-            .typ("tmpfs".to_string())
-            .options(vec!["nosuid".into(), "nodev".into(), "mode=1777".into()])
-            .build()?,
-    ])
+impl std::fmt::Display for StorePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.display().fmt(f)
+    }
 }
 
-fn bind_mount(dest: &str, source: &str, options: &[&str]) -> Result<Mount> {
-    Ok(MountBuilder::default()
-        .destination(PathBuf::from(dest))
-        .source(PathBuf::from(source))
-        .typ("bind".to_string())
-        .options(options.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-        .build()?)
+impl<'de> Deserialize<'de> for StorePath {
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let path = PathBuf::deserialize(de)?;
+        StorePath::new(path).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One sandbox, described completely.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Spec {
+    /// What to run.
+    pub exec: Exec,
+    /// Required base: the closure seed and where `PATH` conventionally points.
+    pub root: StorePath,
+    /// Additive binds layered onto the root.
+    #[serde(default)]
+    pub mounts: Vec<Mount>,
+    /// Producer-filled key/values; `PATH` lives here and is the single source
+    /// of truth for `exec` lookup. The engine merges nothing.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// The memoized resolution output. `Some` ⇒ engine-ready, no Nix query;
+    /// `None` ⇒ `resolve()` computes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure: Option<Resolved>,
+}
+
+/// The process to run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Exec {
+    /// A bare name (resolved via `env.PATH`) or an absolute store path.
+    /// Validated *against* the closure, never a source for it.
+    pub executable: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// The resolved bind set plus its input stamp — the production form of the
+/// `PIEROGI_CLOSURE` bench stub.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Resolved {
+    /// Input stamp: the seeds this closure was resolved from (`root` +
+    /// store-mount / overlay sources). A query-free drift fingerprint.
+    pub from: Vec<StorePath>,
+    /// The flat identity-bind set (what actually gets bound). May omit a
+    /// relocated store-mount source that nothing references (`from ⊋ paths`).
+    pub paths: Vec<StorePath>,
+}
+
+/// An additive mount. The variants are distinguished by **whether the closure
+/// folds**, not by where the source lives (see `docs/spec.md`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Mount {
+    /// Bind + **fold** the source's closure; source must be a store path.
+    /// `dest` omitted → identity bind at `/nix/store/<source>`; present →
+    /// relocate to `dest`. Always read-only (the store is immutable).
+    Store {
+        source: StorePath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dest: Option<PathBuf>,
+    },
+    /// Bind opaquely, **no** fold; source may be anything, including
+    /// `/nix/store`. Read-only unless `rw`.
+    Host {
+        source: PathBuf,
+        dest: PathBuf,
+        #[serde(default)]
+        rw: bool,
+    },
+    /// Writable scratch; no source.
+    Tmpfs { dest: PathBuf },
+    /// A `Store` mount, but writable: fold the lower's closure, present a
+    /// read-write merge at `dest`. `upper` omitted → ephemeral tmpfs;
+    /// `Some(dir)` → persistent host dir. (Realization deferred within M1.)
+    Overlay {
+        source: StorePath,
+        dest: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upper: Option<PathBuf>,
+    },
+}
+
+impl Mount {
+    /// The store-path references this mount contributes as closure seeds:
+    /// `Store` and `Overlay` give their `source`; `Host`/`Tmpfs` give none.
+    pub fn store_refs(&self) -> Option<&StorePath> {
+        match self {
+            Mount::Store { source, .. } | Mount::Overlay { source, .. } => Some(source),
+            Mount::Host { .. } | Mount::Tmpfs { .. } => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_path_accepts_top_level_and_rejects_others() {
+        assert!(StorePath::new("/nix/store/aaaa-bash-5.2").is_ok());
+        assert!(StorePath::new("/nix/store/aaaa-bash-5.2/bin/bash").is_err());
+        assert!(StorePath::new("/nix/store").is_err());
+        assert!(StorePath::new("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn unresolved_spec_round_trips() {
+        let json = r#"{
+            "exec": { "executable": "bash", "args": ["-l"] },
+            "root": "/nix/store/aaaa-base-env",
+            "mounts": [
+                { "type": "store", "source": "/nix/store/bbbb-ripgrep-14.1.0" },
+                { "type": "store", "source": "/nix/store/cccc-myproject", "dest": "/home/dev/project" },
+                { "type": "host",  "source": "/etc/resolv.conf", "dest": "/etc/resolv.conf" },
+                { "type": "tmpfs", "dest": "/tmp" }
+            ],
+            "env": { "PATH": "/nix/store/aaaa-base-env/bin" }
+        }"#;
+        let spec: Spec = serde_json::from_str(json).unwrap();
+        assert!(spec.closure.is_none());
+        assert_eq!(spec.mounts.len(), 4);
+        // seeds = root + the two store sources (host/tmpfs contribute none)
+        let seeds: Vec<_> = spec.mounts.iter().filter_map(Mount::store_refs).collect();
+        assert_eq!(seeds.len(), 2);
+
+        // absent closure stays absent through a serialize round-trip
+        let back = serde_json::to_string(&spec).unwrap();
+        assert!(!back.contains("closure"));
+        let again: Spec = serde_json::from_str(&back).unwrap();
+        assert_eq!(again.mounts.len(), 4);
+    }
+
+    #[test]
+    fn store_source_must_be_a_store_path() {
+        let json = r#"{
+            "exec": { "executable": "bash" },
+            "root": "/nix/store/aaaa-base-env",
+            "mounts": [ { "type": "store", "source": "/etc/passwd" } ]
+        }"#;
+        assert!(serde_json::from_str::<Spec>(json).is_err());
+    }
 }

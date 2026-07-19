@@ -20,15 +20,40 @@ pub mod youki;
 #[cfg(feature = "crun")]
 pub mod crun;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
-    #[default]
     Youki,
     #[cfg(feature = "crun")]
     Crun,
 }
 
+impl Default for Backend {
+    /// **crun is the default** — it loads the spec from memory (no `config.json`
+    /// round-trip to disk), which is why we pivoted to it. youki is the fallback
+    /// when the `crun` feature isn't compiled in (e.g. a plain `cargo build`
+    /// without the C toolchain).
+    fn default() -> Self {
+        #[cfg(feature = "crun")]
+        {
+            Backend::Crun
+        }
+        #[cfg(not(feature = "crun"))]
+        {
+            Backend::Youki
+        }
+    }
+}
+
 impl Backend {
+    /// Select a backend from an optional `--runtime` value: `None` → the default
+    /// (crun when available, else youki).
+    pub fn select(name: Option<&str>) -> Result<Self> {
+        match name {
+            Some(n) => Self::parse(n),
+            None => Ok(Self::default()),
+        }
+    }
+
     /// Parse a `--runtime` value, failing loudly if `crun` is requested but the
     /// feature wasn't compiled in.
     pub fn parse(name: &str) -> Result<Self> {

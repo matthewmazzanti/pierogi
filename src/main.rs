@@ -28,15 +28,19 @@
 //! * **cgroups.** Worked via systemd user-session delegation (rootless).
 
 mod closure;
+mod oci;
+mod resolve;
 mod run;
 mod runtime;
 mod spec;
+
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "pierogi", about = "Nix-focused namespace runtime (M0 spike)")]
+#[command(name = "pierogi", about = "Nix-focused namespace runtime (M1)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -44,13 +48,37 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run a command in a namespaced, read-only sandbox built from its Nix
-    /// closure, e.g. `pierogi run -- bash`.
+    /// Run a sandbox from a spec: `pierogi run <spec.json>`. If the spec carries
+    /// a `closure:`, it launches with no Nix query.
     Run {
-        /// Runtime backend: `youki` (default) or `crun` (needs the `crun`
-        /// build feature).
-        #[arg(long, default_value = "youki")]
-        runtime: String,
+        /// Runtime backend: `crun` (default, needs the `crun` build feature) or
+        /// `youki`. Omit to use the default.
+        #[arg(long)]
+        runtime: Option<String>,
+
+        /// Path to a pierogi `spec.json`.
+        spec: PathBuf,
+    },
+
+    /// Freeze a spec: fill `closure:` and print the resolved spec. With
+    /// `--closure` the closure is *supplied* (build-time, no query).
+    Resolve {
+        /// Path to a pierogi `spec.json`.
+        spec: PathBuf,
+
+        /// A file of store paths (one per line, `closureInfo` `store-paths`
+        /// shape) supplying the closure instead of a live `nix-store` query.
+        #[arg(long)]
+        closure: Option<PathBuf>,
+    },
+
+    /// **Temporary** M0-compatible path: derive the closure from `argv[0]`,
+    /// e.g. `pierogi run-argv -- bash`. Kept for `bench.sh` / smoke tests until
+    /// `wrap` lands (M4).
+    RunArgv {
+        /// Runtime backend: `crun` (default) or `youki`. Omit to use the default.
+        #[arg(long)]
+        runtime: Option<String>,
 
         /// Command and arguments (everything after `--`).
         #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
@@ -70,9 +98,14 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Run { runtime, argv } => {
-            let backend = runtime::Backend::parse(&runtime)?;
-            run::run(argv, backend)
+        Cmd::Run { runtime, spec } => {
+            let backend = runtime::Backend::select(runtime.as_deref())?;
+            run::run_spec(spec, backend)
+        }
+        Cmd::Resolve { spec, closure } => run::resolve_cmd(spec, closure),
+        Cmd::RunArgv { runtime, argv } => {
+            let backend = runtime::Backend::select(runtime.as_deref())?;
+            run::run_argv(argv, backend)
         }
     }
 }
