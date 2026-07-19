@@ -43,11 +43,18 @@ let
   root = pkgs.buildEnv {
     name = "pierogi-bash-root";
     paths = [ pkgs.bash pkgs.coreutils ];
+    # **Symlink**, don't copy. A copy bakes opaque bytes into root (no store
+    # refs); a symlink makes each /etc file a real store path that root
+    # *references* — so Nix folds the three writeText paths into root's closure,
+    # closureInfo picks them up, and they get identity-bound under /nix/store.
+    # This exercises closure resolution: /etc/passwd is a symlink into the store,
+    # and it only resolves inside the sandbox *because* its target is in the
+    # closure (the whole point of the store fold).
     postBuild = ''
       mkdir -p $out/etc
-      cp ${etcPasswd}   $out/etc/passwd
-      cp ${etcGroup}    $out/etc/group
-      cp ${etcHostname} $out/etc/hostname
+      ln -s ${etcPasswd}   $out/etc/passwd
+      ln -s ${etcGroup}    $out/etc/group
+      ln -s ${etcHostname} $out/etc/hostname
     '';
   };
 
