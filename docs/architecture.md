@@ -10,15 +10,16 @@ the config→spec resolution pipeline, and the `closure:` fast-path.
 
 ```
    WRAP MODE (generate at RUNTIME)        NIX MODE (built AHEAD, in store)
-   pierogi wrap -- <bin|store-path>       pierogi run /nix/store/…-sandbox
+   pierogi wrap -- <bin|store-path>       pierogi run /nix/store/…-sandbox.json
             │                                       │
    engine generates live:                  Nix derivation pre-built:
-    • spec (runtime concerns)               • ./spec    (serialized)
-    • synthetic /etc                        • ./rootfs  → closure
-    • rootfs view from closure                (synthetic /etc baked in)
+    • spec (runtime concerns)               • one self-contained resolved spec
+    • synthetic /etc                          — closure.paths names every store
+    • rootfs view from closure                  path by absolute /nix/store path
+            │                                     (hand-rolled /etc baked in root)
             │                                       │
             └──────────────┬────────────────────────┘
-                           ▼   (spec + rootfs, however obtained)
+                           ▼   (a resolved spec, however obtained)
   ┌─────────────────────────────────────────────────────────┐
   │                       Engine (Rust)                      │
   │  obtain spec (generate │ read) → assemble OCI runtime    │
@@ -34,15 +35,21 @@ the config→spec resolution pipeline, and the `closure:` fast-path.
                                                     └──────────────────────┘
 ```
 
-**Key invariant:** the Engine drives the runtime from a **spec + a rootfs**,
-regardless of where they came from. The two front-ends differ only in *when*
-those are produced:
+**Key invariant:** the Engine drives the runtime from a **spec**, regardless of
+where it came from. The spec *carries its own filesystem* — its `closure.paths`
+name the whole closure by absolute store path — so there is no separate rootfs
+input to thread through (the "rootfs" is a representation choice folded into the
+spec; see [Spec & rootfs](#spec--rootfs-build-time-vs-runtime)). The two
+front-ends differ only in *when* the spec is produced:
 
 - **Wrap mode** generates the spec, synthesizes `/etc`, and assembles the rootfs
   view **at runtime** from the target's closure — nothing is pre-built.
-- **Nix mode** points at a **store path built ahead of time** containing a
-  serialized `spec` file and a `rootfs` symlink (with synthetic `/etc` already
-  baked into the closure). The Engine just reads and runs.
+- **Nix mode** points at a **store path built ahead of time** that *is* the
+  resolved spec (a JSON file). Its `closure.paths` name every store path
+  absolutely, so the file is self-contained — Nix pins the whole closure as the
+  artifact's references automatically (it scans the output for `/nix/store/…`
+  strings), and `/etc` is baked into `root`. No `rootfs` symlink; the Engine
+  just reads and runs.
 
 Same engine, same security-critical core; only the provenance of its inputs
 changes. The exact serialized **spec format** is still open in detail (see
@@ -118,33 +125,38 @@ and embedding a Rust runtime library would mean FFI anyway.
 
 ## Spec & rootfs (build-time vs runtime)
 
-The Engine drives the runtime from two things: a **spec** (runtime concerns) and
-a **rootfs** (the filesystem). Both can be produced two ways — generated live by
-wrap mode, or pre-built into the store for nix mode — but the spec's *role* is
-fixed either way.
+The Engine drives the runtime from a **spec** (runtime concerns) plus the
+**filesystem** it describes. These are two *roles*, not two *files*: the
+filesystem is the spec's closure, and in the v0 representation it is carried
+**inside** the spec as `closure.paths` (per-path binds), not as a separate
+rootfs input. A distinct `rootfs` artifact — a merged tree bound wholesale —
+is the deferred lever-6 representation (see
+[startup-performance.md](startup-performance.md)); it would slot in behind the
+same boundary without changing the spec's role. So "spec & rootfs" below names
+the boundary, not a two-entry on-disk layout.
 
-**What the spec carries** (mostly runtime behavior, because the rootfs is a
-separate, already-materialized thing — *not* a filesystem image manifest):
+**What the spec carries** (runtime behavior *plus* the closure that is the
+filesystem — the store paths are named, not shipped as an image manifest):
 
 - namespaces to create
 - uid/gid mapping (subuid/subgid ranges)
 - dbus (and later, socket) proxy rules
 - exec args / cwd / env
 - identity for synthetic `/etc` (hostname, user)
-- a pointer to the rootfs (a store path / closure)
+- `closure.paths` — the closure as absolute store paths (the filesystem)
 
 **Provenance:**
 
 - **Wrap mode** generates the spec in memory from the target + strict defaults,
   and assembles the rootfs view live from the target's closure.
-- **Nix mode** consumes a store path built ahead of time:
-  ```
-  /nix/store/…-sandbox/
-    ├── spec       # serialized spec (the synthetic /etc already baked into rootfs)
-    └── rootfs ->  # symlink to the built closure
-  ```
-  The Engine reads `spec`, points the runtime at `rootfs`, and does almost no
-  preparation work.
+- **Nix mode** consumes a store path built ahead of time that *is* the resolved
+  spec — a single JSON file, e.g. `/nix/store/…-sandbox.json`. No directory and
+  no `rootfs` symlink are needed: `closure.paths` name every store path
+  absolutely, so the file is self-contained (`/etc` baked into `root`) and Nix
+  pins the whole closure as the artifact's runtime references automatically by
+  scanning the output for `/nix/store/…` strings. The Engine reads the file, and
+  because it is already resolved (`closure:` present) it runs the sealed
+  fast-path — this is exactly `run <spec.json>`, no separate code path.
 
 **Format: still open in detail, with one piece now pinned.** The *serialized wire
 format* (JSON vs other, public-contract status) is deferred until M1 tells us what
@@ -316,16 +328,17 @@ below are the endpoints those verbs serve.
 
 ### Nix mode (CLI) — run a prebuilt store path
 
-`pierogi run /nix/store/…-sandbox`
+`pierogi run /nix/store/…-sandbox.json`
 
-- Points the engine at a store path holding a `spec` file + a `rootfs` symlink
-  (see [Spec & rootfs](#spec--rootfs-build-time-vs-runtime)). The engine reads
-  and drives; almost no preparation work — the `spec` already carries its baked
-  `closure:`, so no runtime query runs.
+- Points the engine at a store path that *is* the resolved spec (a self-contained
+  JSON file; see [Spec & rootfs](#spec--rootfs-build-time-vs-runtime)). The engine
+  reads and drives; almost no preparation work — the spec already carries its
+  baked `closure:`, so no runtime query runs, and its `closure.paths` name the
+  filesystem absolutely (no separate `rootfs` symlink to resolve).
 - How those store paths get *built* is, for now, just "some Nix expression that
-  writes a spec (via `pierogi synth-etc` for the baked `/etc` and `pierogi
-  resolve` to bake the `closure:`) and links a closure." A minimal builder helper
-  is enough.
+  writes a spec (via `pierogi synth-etc` for the baked `/etc` — M4; hand-rolled
+  in Nix for M1 — and `pierogi resolve --closure` over `closureInfo` to bake the
+  `closure:`)." A minimal builder helper is enough.
 
 ### Config layer (Nix modules) — DEFERRED / OPEN
 
@@ -336,7 +349,7 @@ The ergonomic declarative layer — an options schema
 (`pierogi.sandboxes.<name> = { ... }`), composable profiles (browser/gui/
 network), NixOS/home-manager integration, and `systemd`-unit emission — is the
 *final* step, not an early one. It's sugar that evaluates down to the same
-`{spec, rootfs}` store path nix mode already consumes; lifecycle stays with
+resolved-spec store path nix mode already consumes; lifecycle stays with
 `systemd`. We design it only after the binary and both run-modes are solid, so
 it is shaped by real usage rather than guessed up front.
 

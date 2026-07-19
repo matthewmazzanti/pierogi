@@ -162,11 +162,13 @@ When both `root` and `closure:` are present, `closure:` drives execution and
 `root` is verifiable provenance — a test can assert `closure == resolve(root)`.
 
 **Representation is swappable.** `closure:` as a flat list (per-path binds — the
-current engine, one `mount` syscall per path) and nix-mode's `rootfs -> <merged
-tree>` symlink are two serializations of the same "resolution done statically"
-idea. Both set the no-query flag; the choice between them is the mount-count
-lever (see startup-performance.md, lever 6) and lives entirely behind the
-`{spec, rootfs}` boundary. Per-path binds for now.
+current engine, one `mount` syscall per path, carried *in* the spec) and a
+`rootfs -> <merged tree>` symlink are two serializations of the same "resolution
+done statically" idea. Both set the no-query flag; the choice between them is the
+mount-count lever (see startup-performance.md, lever 6) and lives entirely behind
+the spec's rootfs-representation seam. **Per-path binds for now** — so the
+nix-mode artifact is just the resolved spec (no separate `rootfs` entry); a
+merged-tree `rootfs` only appears if/when lever 6 lands.
 
 ## Declared-only closure (no discovery)
 
@@ -244,5 +246,6 @@ will eventually be answered.
 - **Discovered closure (`--auto`)** — parked, not part of v0 (see [Declared-only
   closure](#declared-only-closure-no-discovery)); revisit only if declared-only
   proves too rigid.
-- **Rootfs representation** — per-path binds now; merged tree is the lever-6
-  perf question, behind the `{spec, rootfs}` boundary.
+- **Rootfs representation** — per-path binds now (closure carried in the spec, so
+  the nix-mode artifact is a bare resolved spec); a merged-tree `rootfs` is the
+  lever-6 perf question, behind the spec's rootfs-representation seam.

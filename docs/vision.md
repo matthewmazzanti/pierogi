@@ -22,9 +22,10 @@ in strict, secure-by-default behavior so the easy path is the safe path.
 
 ### Nix-world replacement targets
 
-A resolved sandbox is a `{spec, rootfs}` closure plus a declarative description
-of what the namespace sees. That single source of truth is what existing Nix
-packaging functions approximate, less safely — so each is a target to subsume:
+A resolved sandbox is a self-contained spec — its closure (the filesystem) plus
+a declarative description of what the namespace sees. That single source of truth
+is what existing Nix packaging functions approximate, less safely — so each is a
+target to subsume:
 
 | Replaces | Used today for | What Pierogi changes |
 |----------|----------------|----------------------|
@@ -124,11 +125,11 @@ deliberately aspirational and only make sense once the spec/closure model
   (nix), so the logic is never reimplemented in the Nix language.
 - **Run-modes / verbs** — `pierogi wrap` (synthesize a spec from a binary/store
   path and run it live), `pierogi run <spec>` (run a spec — a hand-authored config
-  or a prebuilt store path holding `spec` + a `rootfs` link), and `pierogi
-  resolve` (freeze a spec by baking its `closure:`). Full model:
+  or a prebuilt, self-contained spec store path), and `pierogi resolve` (freeze a
+  spec by baking its `closure:`). Full model:
   [execution-modes.md](execution-modes.md).
 - **Config layer** — the *deferred, last-step* Nix module/options sugar that
-  evaluates down to a nix-mode `{spec, rootfs}` store path. Not part of the core
+  evaluates down to a nix-mode resolved-spec store path. Not part of the core
   deliverable.
 - **Proxy layer** — the D-Bus (and later, other socket) filtering processes the
   Engine supervises alongside the target.

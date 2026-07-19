@@ -49,38 +49,42 @@ defaults, seccomp.
 
 Pull the second run-mode forward and build the **spec → closure → engine** loop
 on it, while keeping the crudeness of M0. This is where the schema, the supplied
-(no-query) closure, and the `{spec, rootfs}` store-path shape get proven end to
-end — the parts this whole design hinges on. **Not** the module/config layer
+(no-query) closure, and the self-contained resolved-spec artifact get proven end
+to end — the parts this whole design hinges on. **Not** the module/config layer
 (that's last); just the engine consuming a spec and a minimal builder producing
 one.
 
 **Forces:** the typed spec schema (`serde`), the mode-agnostic engine realization
-tail, the pluggable (supplied) closure source, the `{spec, rootfs}` store shape.
+tail, the pluggable (supplied) closure source, the self-contained spec artifact.
 
-- [ ] Typed `Spec` / `Mount` / `Resolved` + `serde` (the v0 schema — see
+- [x] Typed `Spec` / `Mount` / `Resolved` + `serde` (the v0 schema — see
       [spec.md](spec.md)), replacing M0's ad-hoc `SpecInputs`.
-- [ ] `resolve()`: seeds = `root ∪ store_refs(mounts)`; `closure_of` **pluggable**
+- [x] `resolve()`: seeds = `root ∪ store_refs(mounts)`; `closure_of` **pluggable**
       — live `nix-store --query --requisites` (host) *or* a supplied list; stamp
       `{from, paths}`. Reuse the `PIEROGI_CLOSURE` validation.
-- [ ] Refactor `build_spec` to consume a **resolved** `Spec`: `closure.paths` →
+- [x] Refactor `build_spec` to consume a **resolved** `Spec`: `closure.paths` →
       identity binds, `mounts` → OCI mounts (`Store`/`Host`/`Tmpfs`; `Overlay`
-      after), `env` → `process.env`, `exec` → argv.
-- [ ] `pierogi run <spec.json>` — load, closure present ⇒ no query, realize,
-      launch; and `pierogi run <store-path>` reading `./spec` + `./rootfs`.
-- [ ] `pierogi resolve <spec>` (freeze → bake `closure:`) incl. `resolve
+      after — still stubbed), `env` → `process.env`, `exec` → argv.
+- [x] `pierogi run <spec.json>` — load, closure present ⇒ no query, realize,
+      launch. `pierogi run <store-path>` is the *same* path: the nix-mode
+      artifact is just a resolved spec file (see the builder item), so a store
+      path is a `spec.json` that happens to live in the store.
+- [x] `pierogi resolve <spec>` (freeze → bake `closure:`) incl. `resolve
       --closure <store-paths>` for the build-time supplied path.
 - [ ] Minimal Nix builder: `root = buildEnv/pkgs` **with a hand-rolled `/etc`**
       (fixed `passwd`/`group`/`hostname` written as Nix strings, baked into the
       root — real files, authored by hand, *not* synth-generated), `closureInfo {
-      rootPaths = seeds }` → `paths`, emit `spec.json` with `closure: {from,
-      paths}`, produce a `{spec, rootfs}` store path (see
-      [spec.md](spec.md#nix-mode-closure-source-build-time)).
+      rootPaths = seeds }` → `paths`, run `resolve --closure` → emit a
+      **self-contained `spec.json` store path** (a single JSON file, not a
+      directory: `closure.paths` name the closure absolutely, so no `rootfs`
+      entry is needed and Nix pins the closure via the path strings it contains).
+      See [spec.md](spec.md#nix-mode-closure-source-build-time).
 
 **Acceptance:**
 - `pierogi run <hand-authored spec.json>` launches `bash` from its declared
-  closure with **no `nix-store` query** (closure supplied).
-- `nix build` produces a `{spec, rootfs}` store path that `pierogi run <path>`
-  launches into the same shell.
+  closure with **no `nix-store` query** (closure supplied). ✅
+- `nix build` produces a self-contained `spec.json` store path that `pierogi run
+  <path>` launches into the same shell.
 - inside it, `cat /etc/passwd` shows the **hand-rolled** file baked into the root
   — proving the baked-`/etc`-in-root path (synth automation is M4).
 
@@ -230,9 +234,9 @@ explicit in the profile and justified in writing, not blanket host exposure.
 > has shown what the sugar should crystallize.
 
 Promote the hand-written nix-mode store paths into ergonomic, declarative,
-composable modules — pure sugar over the `{spec, rootfs}` path M1 already runs.
+composable modules — pure sugar over the resolved-spec store path M1 already runs.
 
-**Forces:** options schema, `module → {spec, rootfs}` evaluation, profile
+**Forces:** options schema, `module → resolved-spec` evaluation, profile
 composition, OS integration.
 
 - [ ] `pierogi.sandboxes.<name>` options schema evaluating to a nix-mode store
@@ -268,8 +272,8 @@ is **interest-and-uncertainty-driven**, a deliberate departure from harden-first
   unknown; everything else builds on it. That much is unchanged.
 - **Nix-mode (M1) comes next** because the spec → supplied-closure → engine loop
   is the design's core bet, and proving it end-to-end (schema, `closureInfo`,
-  `{spec, rootfs}`) validates the whole model cheaply — crudely, reusing M0's lack
-  of hardening.
+  self-contained resolved-spec artifact) validates the whole model cheaply —
+  crudely, reusing M0's lack of hardening.
 - **D-Bus (M2) and GPU/Wayland (M3) are pulled forward** because they're the
   *novel, uncertain* integrations — proxying sockets and narrowing device access
   is where the real unknowns live. Building them early also lets them **shape the
