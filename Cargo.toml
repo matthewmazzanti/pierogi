@@ -9,9 +9,12 @@ name = "pierogi"
 path = "src/main.rs"
 
 [features]
-# libcrun backend via the FFI shim in csrc/shim.c. Off by default so the plain
-# `cargo build` (youki only) needs no C toolchain or CRUN_DEV. Build with
-# `--features crun` inside `nix develop`.
+# crun is the default backend, so its libcrun FFI shim (csrc/shim.c) compiles by
+# default — every build path (cargo, devShell, the flake `pierogi` package) uses
+# crun. This needs a C toolchain + the harvested libcrun dev tree at $CRUN_DEV,
+# both of which `nix develop` / the flake provide. To build youki-only without
+# that toolchain, opt out with `cargo build --no-default-features`.
+default = ["crun"]
 crun = []
 
 [dependencies]

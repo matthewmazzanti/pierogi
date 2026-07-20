@@ -68,23 +68,30 @@
       packages = forAll (system:
         let
           pkgs = pkgsFor system;
-          # pierogi itself, default features (youki only) — the nix-mode builder
-          # only needs `resolve`, which drives no runtime backend, so this build
-          # needs no C toolchain / CRUN_DEV / libcrun. Just libseccomp for the
-          # youki path that's compiled in but unused here.
+          # The harvested libcrun dev tree (headers + libcrun.so), shared by the
+          # devShell and the pierogi build below.
+          crunDev = crunDevFor pkgs;
+          # pierogi with the crun backend compiled in (now the default feature).
+          # crun links libcrun via the shim, so this build needs the same bits as
+          # the devShell: a C toolchain (from stdenv), $CRUN_DEV, and crunDev on
+          # buildInputs (libcrun.so to link + its RUNPATH, yajl headers via the
+          # cc-wrapper). The nix-mode builder only calls `resolve` (no backend),
+          # but the binary still links libcrun — a heavier *build-time* closure,
+          # with no effect on the emitted spec.json artifact.
           pierogi = pkgs.rustPlatform.buildRustPackage {
             pname = "pierogi";
             version = "0.0.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.pkg-config ];
-            buildInputs = [ pkgs.libseccomp ];
+            buildInputs = [ pkgs.libseccomp crunDev ];
             LIBSECCOMP_LIB_PATH = "${pkgs.libseccomp.lib}/lib";
+            CRUN_DEV = "${crunDev}";
             # tests hit nix-store / namespaces — not build-sandbox friendly.
             doCheck = false;
           };
         in {
-          crun-dev = crunDevFor pkgs;
+          crun-dev = crunDev;
           inherit pierogi;
           # M1 tire-kicker: a self-contained resolved spec.json for a static
           # bash + coreutils sandbox with a hand-rolled /etc.
