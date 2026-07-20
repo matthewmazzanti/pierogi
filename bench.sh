@@ -27,11 +27,26 @@ BIN=$PWD/target/release/pierogi
 TARGET=$(type -P true)
 
 # Precompute the closure once and stub it in via the env var. STORE_ROOT is the
-# top-level store dir of the canonicalized target.
+# top-level store dir of the canonicalized target; BIN_DIR its bin/ (env.PATH).
 STORE_EXE=$(readlink -f "$TARGET")
 STORE_ROOT=/nix/store/$(cut -d/ -f1 <<<"${STORE_EXE#/nix/store/}")
+BIN_DIR=${STORE_EXE%/*}
 PIEROGI_CLOSURE=$(nix-store --query --requisites "$STORE_ROOT" | paste -sd:)
 export PIEROGI_CLOSURE
+
+# The exe/wrap bridge was rolled back, so bench drives the kept path: a raw
+# spec (closure filled from $PIEROGI_CLOSURE, no query in the timed loop). Same
+# spec for both backends — only --runtime differs.
+SPEC=$(mktemp --suffix=.pierogi.json)
+trap 'rm -f "$SPEC"' EXIT
+cat >"$SPEC" <<EOF
+{
+  "exec": { "executable": "true" },
+  "root": "$STORE_ROOT",
+  "mounts": [ { "type": "tmpfs", "dest": "/tmp" } ],
+  "env": { "PATH": "$BIN_DIR" }
+}
+EOF
 
 echo "target:  $TARGET"
 echo "closure: $(tr ':' '\n' <<<"$PIEROGI_CLOSURE" | wc -l) paths (precomputed; nix-store query skipped)"
@@ -41,4 +56,4 @@ hyperfine \
   --warmup 5 \
   --runs "$RUNS" \
   --parameter-list runtime youki,crun \
-  "$BIN run-argv --runtime={runtime} -- $TARGET"
+  "$BIN run --runtime={runtime} $SPEC"

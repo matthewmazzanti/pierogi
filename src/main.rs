@@ -61,7 +61,9 @@ enum Cmd {
     },
 
     /// Freeze a spec: fill `closure:` and print the resolved spec. With
-    /// `--closure` the closure is *supplied* (build-time, no query).
+    /// `--closure` the closure is *supplied* (build-time, no query); without
+    /// it, a live `nix-store` query — the raw-spec resolve we keep for parity
+    /// against the build-time closure.
     Resolve {
         /// Path to a pierogi `spec.json`.
         spec: PathBuf,
@@ -70,19 +72,6 @@ enum Cmd {
         /// shape) supplying the closure instead of a live `nix-store` query.
         #[arg(long)]
         closure: Option<PathBuf>,
-    },
-
-    /// **Temporary** M0-compatible path: derive the closure from `argv[0]`,
-    /// e.g. `pierogi run-argv -- bash`. Kept for `bench.sh` / smoke tests until
-    /// `wrap` lands (M4).
-    RunArgv {
-        /// Runtime backend: `crun` (default) or `youki`. Omit to use the default.
-        #[arg(long)]
-        runtime: Option<String>,
-
-        /// Command and arguments (everything after `--`).
-        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
-        argv: Vec<String>,
     },
 }
 
@@ -103,9 +92,5 @@ fn main() -> Result<()> {
             run::run_spec(spec, backend)
         }
         Cmd::Resolve { spec, closure } => run::resolve_cmd(spec, closure),
-        Cmd::RunArgv { runtime, argv } => {
-            let backend = runtime::Backend::select(runtime.as_deref())?;
-            run::run_argv(argv, backend)
-        }
     }
 }

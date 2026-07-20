@@ -64,9 +64,10 @@ profile → `root`, `PATH` from its `bin/`). Either way it's not a separate engi
 path — the bridge **synthesizes a spec** from the input + strict defaults + the
 default base rootfs, then runs the normal tail. `wrap --dry-run` stops after the
 bridge and prints that synthesized spec **unresolved** — the editable *starting
-point* for hand-authoring. (Exact CLI surface for the store-path form lands with
-`wrap` at M4; today only the exe bridge exists, as the temporary `run-argv` —
-the store-path fold isn't built yet.)
+point* for hand-authoring. (The whole `wrap` family lands at M4. The temporary
+`run-argv` exe bridge that stood in for it was **rolled back** once nix-mode
+build-time resolution became the way in — today the engine is spec-only: `run`
+and `resolve` consume a spec, and nothing synthesizes one yet.)
 
 > **"Run a store path" is not a `run` mode.** Folding an *arbitrary* store path
 > (a package/env) to run a command in it is ad-hoc → it's a **`wrap`** input, per

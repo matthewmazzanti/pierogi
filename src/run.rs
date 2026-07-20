@@ -1,24 +1,21 @@
 //! Orchestrate a run: obtain a spec → resolve → realize → drive a backend.
 //!
-//! Three entry points:
-//! * [`run_spec`] — the M1 verb: load a `spec.json`, resolve (no query if it
+//! Two entry points, both spec-in (no ad-hoc `wrap`/exe bridge — that path was
+//! rolled back once nix-mode build-time resolution became the way in):
+//! * [`run_spec`] — the `run` verb: load a `spec.json`, resolve (no query if it
 //!   already carries a `closure:`), launch.
-//! * [`resolve_cmd`] — the M1 `resolve` verb: load, resolve (live *or* a
-//!   supplied `--closure`), print the resolved spec.
-//! * [`run_argv`] — a **temporary** exe-derived path preserving M0's `run --
-//!   bash` behavior for `bench.sh` and quick smoke tests. Slated for re-eval
-//!   when `wrap` lands (M4); it synthesizes a spec and feeds the same tail.
+//! * [`resolve_cmd`] — the `resolve` verb: load, resolve (live query on a raw
+//!   spec, *or* a supplied `--closure`), print the resolved spec. The live path
+//!   is what lets us parity-check a build-time closure against a fresh resolve.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result};
 
-use crate::closure::{resolve_store_exe, store_root};
 use crate::oci::{build_spec, RealizeInputs};
 use crate::resolve::{resolve, resolve_exec, resolve_supplied};
 use crate::runtime::Backend;
-use crate::spec::{Exec, Mount, Spec, StorePath};
+use crate::spec::{Mount, Spec};
 
 /// `pierogi run <spec.json>` — load a spec, resolve it, and launch.
 pub fn run_spec(spec_path: PathBuf, backend: Backend) -> Result<()> {
@@ -41,39 +38,6 @@ pub fn resolve_cmd(spec_path: PathBuf, closure_file: Option<PathBuf>) -> Result<
     let json = serde_json::to_string_pretty(&spec).context("serializing resolved spec")?;
     println!("{json}");
     Ok(())
-}
-
-/// **Temporary** M0-compatible path: derive the closure from `argv[0]`.
-pub fn run_argv(argv: Vec<String>, backend: Backend) -> Result<()> {
-    ensure!(!argv.is_empty(), "no command given");
-
-    let exe = resolve_store_exe(&argv[0])?;
-    let root = StorePath::new(store_root(&exe)?)?;
-    let bin_dir = exe
-        .parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/".to_string());
-
-    let env = BTreeMap::from([
-        ("PATH".to_string(), bin_dir),
-        ("HOME".to_string(), "/".to_string()),
-        ("TERM".to_string(), "xterm-256color".to_string()),
-        ("PS1".to_string(), "pierogi:\\w# ".to_string()),
-    ]);
-
-    let spec = Spec {
-        exec: Exec {
-            executable: argv[0].clone(),
-            args: argv[1..].to_vec(),
-        },
-        root,
-        mounts: vec![Mount::Tmpfs {
-            dest: PathBuf::from("/tmp"),
-        }],
-        env,
-        closure: None,
-    };
-    launch(spec, backend)
 }
 
 /// The mode-agnostic tail: resolve → realize → drive a backend → clean up.

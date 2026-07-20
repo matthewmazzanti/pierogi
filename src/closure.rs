@@ -26,32 +26,6 @@ use crate::spec::StorePath;
 /// closure once and feed it in here to isolate that. Not for production use.
 const CLOSURE_OVERRIDE_ENV: &str = "PIEROGI_CLOSURE";
 
-/// Resolve a command (bare name or path) to a canonical executable that lives
-/// in `/nix/store`. Used by the temporary `run-argv` (exe-derived) path only;
-/// the spec pipeline resolves `exec` *within* an already-computed closure (see
-/// [`crate::resolve`]).
-pub fn resolve_store_exe(cmd: &str) -> Result<PathBuf> {
-    let candidate = if cmd.contains('/') {
-        PathBuf::from(cmd)
-    } else {
-        which(&std::env::var("PATH").unwrap_or_default(), cmd)
-            .with_context(|| format!("`{cmd}` not found in PATH"))?
-    };
-
-    // Follow symlinks (e.g. a profile's bin/bash) down to the real store file.
-    let exe = std::fs::canonicalize(&candidate)
-        .with_context(|| format!("canonicalizing {}", candidate.display()))?;
-
-    if !exe.starts_with("/nix/store/") {
-        bail!(
-            "{cmd} resolves to {} which is not in /nix/store; a store-backed \
-             binary is required so it can compute a closure",
-            exe.display()
-        );
-    }
-    Ok(exe)
-}
-
 /// Look up `cmd` against a `:`-separated `PATH` string, returning the first
 /// `dir/cmd` that is a file.
 pub fn which(path: &str, cmd: &str) -> Option<PathBuf> {
