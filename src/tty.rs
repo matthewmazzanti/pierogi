@@ -153,11 +153,12 @@ fn accept_master(listener: &OwnedFd, quit: &EventFd) -> Result<Option<OwnedFd>> 
         if !wait(&mut pfds)? {
             continue; // EINTR
         }
-        if has(&pfds[1], PollFlags::POLLIN) {
+        let [listener_pf, quit_pf] = &pfds;
+        if has(quit_pf, PollFlags::POLLIN) {
             let _ = quit.read();
             return Ok(None);
         }
-        if has(&pfds[0], PollFlags::POLLIN) {
+        if has(listener_pf, PollFlags::POLLIN) {
             let conn = retry(|| accept(listener.as_raw_fd())).context("accept console socket")?;
             // Own the accepted fd so it closes when we're done receiving.
             let conn = unsafe { OwnedFd::from_raw_fd(conn) };
@@ -188,38 +189,45 @@ fn relay(master: &OwnedFd, wake: &EventFd, quit: &EventFd) -> Result<()> {
             continue; // EINTR
         }
 
+        // Name the poll slots so readiness reads by role, not index. `stdin_pf`
+        // is a 0-or-1 slice — empty once our stdin has hit EOF and we stopped
+        // polling it.
+        let [master_pf, wake_pf, quit_pf, stdin_pf @ ..] = pfds.as_slice() else {
+            unreachable!("relay always polls master, wake, and quit");
+        };
+
         // Quit → stop; drain the counter first (tidy, though we're leaving).
-        if has(&pfds[2], PollFlags::POLLIN) {
+        if has(quit_pf, PollFlags::POLLIN) {
             let _ = quit.read();
             break;
         }
         // Resize → drain the counter and re-propagate the window size.
-        if has(&pfds[1], PollFlags::POLLIN) {
+        if has(wake_pf, PollFlags::POLLIN) {
             let _ = wake.read();
             copy_winsize(master.as_raw_fd());
         }
 
         // Master → stdout. A closed slave surfaces as EIO / POLLHUP; either ends
         // the session.
-        if has(&pfds[0], PollFlags::POLLIN) {
+        if has(master_pf, PollFlags::POLLIN) {
             match retry(|| read(master, &mut buf)) {
                 Ok(n) if n > 0 => write_all(&stdout, &buf[..n]),
                 _ => break,
             }
         }
-        if has(&pfds[0], PollFlags::POLLHUP | PollFlags::POLLERR) {
+        if has(master_pf, PollFlags::POLLHUP | PollFlags::POLLERR) {
             break;
         }
 
-        // Stdin → master. Our own EOF just stops that direction; the container
-        // keeps running until its pty closes.
-        if stdin_open {
-            if has(&pfds[3], PollFlags::POLLIN) {
+        // Stdin → master. Our own EOF just stops that direction (drops stdin from
+        // the poll set next iteration); the container keeps running.
+        if let Some(stdin_pf) = stdin_pf.first() {
+            if has(stdin_pf, PollFlags::POLLIN) {
                 match retry(|| read(stdin_fd, &mut buf)) {
                     Ok(n) if n > 0 => write_all(master, &buf[..n]),
                     _ => stdin_open = false,
                 }
-            } else if has(&pfds[3], PollFlags::POLLHUP | PollFlags::POLLERR) {
+            } else if has(stdin_pf, PollFlags::POLLHUP | PollFlags::POLLERR) {
                 stdin_open = false;
             }
         }
