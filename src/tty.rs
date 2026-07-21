@@ -16,33 +16,37 @@
 //! the controlling-tty setup is the runtime's job, delegated by `terminal:true`.
 //!
 //! The syscall surface goes through `nix`'s checked wrappers (sockets, the
-//! `SCM_RIGHTS` recvmsg, poll, termios, signal masks). Two things stay raw
-//! `libc`: the `TIOCGWINSZ`/`TIOCSWINSZ` ioctls, and the one-byte `write` in the
-//! `SIGWINCH` handler (which must be async-signal-safe).
+//! `SCM_RIGHTS` recvmsg, poll, termios, eventfds, signal masks). Two things stay
+//! raw `libc`: the `TIOCGWINSZ`/`TIOCSWINSZ` ioctls, and the eventfd counter
+//! bump in the `SIGWINCH` handler (which must be async-signal-safe).
 
 use std::io::IoSliceMut;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use anyhow::{bail, Context, Result};
 use nix::errno::Errno;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use nix::sys::eventfd::{EfdFlags, EventFd};
 use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::socket::{
     accept, bind, listen, recvmsg, socket, AddressFamily, Backlog, ControlMessageOwned, MsgFlags,
     SockFlag, SockType, UnixAddr,
 };
 use nix::sys::termios::{self, SetArg};
-use nix::unistd::{isatty, pipe, read, write};
+use nix::unistd::{isatty, read, write};
 
 const STDIN: RawFd = 0;
 
-/// Write-end of the control pipe, published for the async-signal `SIGWINCH`
-/// handler. `-1` when no relay is active. The handler only ever `write()`s a
-/// single byte to it — async-signal-safe.
-static CTL_WRITE: AtomicI32 = AtomicI32::new(-1);
+/// Raw fd of the resize `eventfd`, published for the async-signal `SIGWINCH`
+/// handler. `-1` when no relay is active. The handler only ever bumps the
+/// counter with a lone `write()` — async-signal-safe. The eventfd it points at
+/// is kept alive by [`ConsoleRelay`] (an `Arc`), so this fd stays valid until
+/// `finish` resets it to `-1`.
+static WAKE_FD: AtomicI32 = AtomicI32::new(-1);
 
 /// A bound console socket plus the thread servicing it. Backend-agnostic: hand
 /// [`socket_path`](Self::socket_path) to whichever runtime, run the backend
@@ -50,7 +54,15 @@ static CTL_WRITE: AtomicI32 = AtomicI32::new(-1);
 /// restore the terminal and join.
 pub struct ConsoleRelay {
     socket_path: PathBuf,
-    ctl_write: OwnedFd,
+    /// Poked (from normal code) to make the relay thread stop.
+    quit: Arc<EventFd>,
+    /// The resize eventfd — held only to keep it alive for the SIGWINCH handler
+    /// (which reaches it via [`WAKE_FD`]); the relay thread holds the other
+    /// `Arc` and does the reading.
+    _wake: Arc<EventFd>,
+    /// The SIGWINCH disposition from before we installed ours, restored on
+    /// teardown so the relay leaves the process's signal state as it found it.
+    prev_sigwinch: SigAction,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -61,13 +73,17 @@ impl ConsoleRelay {
     pub fn bind(socket_path: PathBuf) -> Result<Self> {
         let listener = bind_listen(&socket_path)?;
 
-        // Control pipe: the relay thread's wakeup channel. The SIGWINCH handler
-        // writes `w` (window changed); `finish` writes `q` (quit) so the thread
-        // unblocks even if it's still waiting for a connection that never comes.
-        let (ctl_read, ctl_write) = pipe().context("console control pipe")?;
-        CTL_WRITE.store(ctl_write.as_raw_fd(), Ordering::SeqCst);
-        install_sigwinch()?;
+        // Two eventfds are the relay thread's wakeup channels: `wake`, bumped by
+        // the SIGWINCH handler (self-pipe trick, but an eventfd — one fd, an
+        // 8-byte counter); and `quit`, poked by `finish` so the thread unblocks
+        // even while still waiting for a connection that never comes. Both are
+        // `Arc`-shared so the handler's `wake` fd outlives the relay thread.
+        let flags = EfdFlags::EFD_CLOEXEC | EfdFlags::EFD_NONBLOCK;
+        let wake = Arc::new(EventFd::from_flags(flags).context("resize eventfd")?);
+        let quit = Arc::new(EventFd::from_flags(flags).context("quit eventfd")?);
+        let prev_sigwinch = install_sigwinch(&wake)?;
 
+        let (wake_r, quit_r) = (Arc::clone(&wake), Arc::clone(&quit));
         let handle = std::thread::spawn(move || {
             // Block SIGCHLD in this thread. It's process-directed, so the kernel
             // would otherwise be free to deliver the container's exit signal
@@ -76,14 +92,16 @@ impl ConsoleRelay {
             // forever on an already-dead child. Safe to do at thread entry: the
             // container doesn't exist yet, so no SIGCHLD can be pending.
             block_sigchld();
-            if let Err(e) = serve(listener, ctl_read) {
+            if let Err(e) = serve(listener, wake_r, quit_r) {
                 eprintln!("pierogi: console relay: {e:#}");
             }
         });
 
         Ok(ConsoleRelay {
             socket_path,
-            ctl_write,
+            quit,
+            _wake: wake,
+            prev_sigwinch,
             handle: Some(handle),
         })
     }
@@ -95,23 +113,25 @@ impl ConsoleRelay {
 
     /// Stop the relay, restore the terminal, and clean up. Consumes `self`.
     pub fn finish(mut self) {
-        // Nudge the relay thread to quit, then wait for it (it restores termios
-        // in its own guard as it unwinds).
-        let _ = write(&self.ctl_write, b"q");
+        // Tear down the SIGWINCH wiring first (its target fd is about to go
+        // away), then nudge the relay thread to quit and wait for it (it
+        // restores termios in its own guard as it unwinds).
+        uninstall_sigwinch(&self.prev_sigwinch);
+        let _ = self.quit.write(1);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
-        CTL_WRITE.store(-1, Ordering::SeqCst);
         let _ = std::fs::remove_file(&self.socket_path);
-        // `ctl_write` (OwnedFd) closes on drop.
+        // The eventfds (Arc<EventFd>) close once both this and the relay's clones
+        // drop — the relay's are already gone after the join above.
     }
 }
 
 /// Accept the runtime's connection, receive the pty master, and relay until the
-/// pty closes (or `finish` asks us to quit). Owns `listener`/`ctl_read`, which
-/// close as it returns.
-fn serve(listener: OwnedFd, ctl_read: OwnedFd) -> Result<()> {
-    let master = match accept_master(&listener, &ctl_read)? {
+/// pty closes (or `finish` asks us to quit). Owns `listener`, which closes as it
+/// returns; `wake`/`quit` are the shared eventfds.
+fn serve(listener: OwnedFd, wake: Arc<EventFd>, quit: Arc<EventFd>) -> Result<()> {
+    let master = match accept_master(&listener, &quit)? {
         Some(fd) => fd,
         None => return Ok(()), // asked to quit before the runtime ever connected
     };
@@ -119,21 +139,22 @@ fn serve(listener: OwnedFd, ctl_read: OwnedFd) -> Result<()> {
     // Raw mode + initial window size only once we actually own the master.
     let _raw = RawModeGuard::enable();
     copy_winsize(master.as_raw_fd());
-    relay(&master, &ctl_read)
+    relay(&master, &wake, &quit)
 }
 
 /// Wait for either the runtime to connect (→ receive & return the master fd) or
-/// a `q` on the control pipe (→ `None`, quit).
-fn accept_master(listener: &OwnedFd, ctl_read: &OwnedFd) -> Result<Option<OwnedFd>> {
+/// a `quit` poke (→ `None`, quit).
+fn accept_master(listener: &OwnedFd, quit: &EventFd) -> Result<Option<OwnedFd>> {
     loop {
         let mut pfds = [
             PollFd::new(listener.as_fd(), PollFlags::POLLIN),
-            PollFd::new(ctl_read.as_fd(), PollFlags::POLLIN),
+            PollFd::new(quit.as_fd(), PollFlags::POLLIN),
         ];
         if !wait(&mut pfds)? {
             continue; // EINTR
         }
-        if has(&pfds[1], PollFlags::POLLIN) && drain_ctl_is_quit(ctl_read) {
+        if has(&pfds[1], PollFlags::POLLIN) {
+            let _ = quit.read();
             return Ok(None);
         }
         if has(&pfds[0], PollFlags::POLLIN) {
@@ -146,8 +167,9 @@ fn accept_master(listener: &OwnedFd, ctl_read: &OwnedFd) -> Result<Option<OwnedF
 }
 
 /// The bidirectional copy loop: stdin → master, master → stdout, until the
-/// master (pty) closes or we're told to quit.
-fn relay(master: &OwnedFd, ctl_read: &OwnedFd) -> Result<()> {
+/// master (pty) closes or we're told to quit. `wake` fires on `SIGWINCH`
+/// (re-propagate window size); `quit` ends the loop.
+fn relay(master: &OwnedFd, wake: &EventFd, quit: &EventFd) -> Result<()> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let stdin_fd = stdin.as_fd();
@@ -156,7 +178,8 @@ fn relay(master: &OwnedFd, ctl_read: &OwnedFd) -> Result<()> {
     loop {
         let mut pfds = vec![
             PollFd::new(master.as_fd(), PollFlags::POLLIN),
-            PollFd::new(ctl_read.as_fd(), PollFlags::POLLIN),
+            PollFd::new(wake.as_fd(), PollFlags::POLLIN),
+            PollFd::new(quit.as_fd(), PollFlags::POLLIN),
         ];
         if stdin_open {
             pfds.push(PollFd::new(stdin_fd, PollFlags::POLLIN));
@@ -165,17 +188,15 @@ fn relay(master: &OwnedFd, ctl_read: &OwnedFd) -> Result<()> {
             continue; // EINTR
         }
 
-        // Control: `q` → quit, `w` → re-propagate window size.
+        // Quit → stop; drain the counter first (tidy, though we're leaving).
+        if has(&pfds[2], PollFlags::POLLIN) {
+            let _ = quit.read();
+            break;
+        }
+        // Resize → drain the counter and re-propagate the window size.
         if has(&pfds[1], PollFlags::POLLIN) {
-            let mut c = [0u8; 64];
-            if let Ok(n) = retry(|| read(ctl_read, &mut c)) {
-                if c[..n].contains(&b'q') {
-                    break;
-                }
-                if c[..n].contains(&b'w') {
-                    copy_winsize(master.as_raw_fd());
-                }
-            }
+            let _ = wake.read();
+            copy_winsize(master.as_raw_fd());
         }
 
         // Master → stdout. A closed slave surfaces as EIO / POLLHUP; either ends
@@ -193,12 +214,12 @@ fn relay(master: &OwnedFd, ctl_read: &OwnedFd) -> Result<()> {
         // Stdin → master. Our own EOF just stops that direction; the container
         // keeps running until its pty closes.
         if stdin_open {
-            if has(&pfds[2], PollFlags::POLLIN) {
+            if has(&pfds[3], PollFlags::POLLIN) {
                 match retry(|| read(stdin_fd, &mut buf)) {
                     Ok(n) if n > 0 => write_all(master, &buf[..n]),
                     _ => stdin_open = false,
                 }
-            } else if has(&pfds[2], PollFlags::POLLHUP | PollFlags::POLLERR) {
+            } else if has(&pfds[3], PollFlags::POLLHUP | PollFlags::POLLERR) {
                 stdin_open = false;
             }
         }
@@ -221,12 +242,6 @@ fn has(pfd: &PollFd, flags: PollFlags) -> bool {
     pfd.revents()
         .unwrap_or(PollFlags::empty())
         .intersects(flags)
-}
-
-/// Read and discard the control pipe; `true` if a `q` byte was present.
-fn drain_ctl_is_quit(ctl_read: &OwnedFd) -> bool {
-    let mut c = [0u8; 64];
-    matches!(retry(|| read(ctl_read, &mut c)), Ok(n) if c[..n].contains(&b'q'))
 }
 
 /// Receive a single fd sent over `conn` via `SCM_RIGHTS`. `nix` parses the
@@ -304,22 +319,39 @@ fn copy_winsize(master: RawFd) {
     }
 }
 
-fn install_sigwinch() -> Result<()> {
+/// Publish the eventfd the handler bumps, then install the handler — the two
+/// halves of the global SIGWINCH wiring, kept together.
+fn install_sigwinch(wake: &EventFd) -> Result<SigAction> {
+    WAKE_FD.store(wake.as_raw_fd(), Ordering::SeqCst);
     let action = SigAction::new(
         SigHandler::Handler(on_sigwinch),
         SaFlags::SA_RESTART,
         SigSet::empty(),
     );
-    // SAFETY: the handler is async-signal-safe (a lone one-byte write).
-    unsafe { sigaction(Signal::SIGWINCH, &action) }.context("installing SIGWINCH handler")?;
-    Ok(())
+    // SAFETY: the handler is async-signal-safe (a lone eventfd counter bump).
+    let prev =
+        unsafe { sigaction(Signal::SIGWINCH, &action) }.context("installing SIGWINCH handler")?;
+    Ok(prev)
+}
+
+/// Mirror of [`install_sigwinch`], in reverse order: restore the *saved*
+/// disposition first — not a blind `SIG_DFL`, so we don't clobber a handler
+/// another part of the process may have installed — then retire `WAKE_FD`.
+/// Removing our handler before the fd is unpublished keeps the invariant "our
+/// handler installed ⇒ `WAKE_FD` valid" holding through teardown, rather than
+/// leaning on the sentinel guard during a transient window.
+fn uninstall_sigwinch(prev: &SigAction) {
+    // SAFETY: `prev` is the disposition `sigaction` handed back at install time.
+    let _ = unsafe { sigaction(Signal::SIGWINCH, prev) };
+    WAKE_FD.store(-1, Ordering::SeqCst);
 }
 
 extern "C" fn on_sigwinch(_sig: libc::c_int) {
-    let fd = CTL_WRITE.load(Ordering::SeqCst);
+    let fd = WAKE_FD.load(Ordering::SeqCst);
     if fd >= 0 {
-        // async-signal-safe: a lone raw write of one byte.
-        unsafe { libc::write(fd, b"w".as_ptr().cast(), 1) };
+        // async-signal-safe: a lone eventfd counter bump (write of a u64).
+        let one: u64 = 1;
+        unsafe { libc::write(fd, (&one as *const u64).cast(), std::mem::size_of::<u64>()) };
     }
 }
 
