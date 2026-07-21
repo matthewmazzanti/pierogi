@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 
 use crate::oci::{build_spec, RealizeInputs};
 use crate::overrides::Overrides;
-use crate::resolve::{resolve, resolve_exec, resolve_supplied};
+use crate::resolve::{resolve, resolve_supplied};
 use crate::runtime::Backend;
 use crate::spec::{Mount, Spec};
 use crate::tty::ConsoleRelay;
@@ -53,8 +53,9 @@ pub fn resolve_cmd(spec_path: PathBuf, closure_file: Option<PathBuf>) -> Result<
 /// The mode-agnostic tail: resolve → realize → drive a backend → clean up.
 fn launch(mut spec: Spec, backend: Backend) -> Result<()> {
     // Resolve: fill `closure:` (live query) or short-circuit if already sealed.
+    // The exec target is resolved by the runtime against the container's PATH at
+    // launch (in-sandbox), not here.
     resolve(&mut spec)?;
-    let exe = resolve_exec(&spec)?;
 
     let closure = spec.closure.as_ref().expect("resolved above");
     eprintln!(
@@ -77,7 +78,6 @@ fn launch(mut spec: Spec, backend: Backend) -> Result<()> {
 
     let oci = build_spec(&RealizeInputs {
         spec: &spec,
-        exe: &exe,
         rootfs_rel: "rootfs",
         uid,
         gid,

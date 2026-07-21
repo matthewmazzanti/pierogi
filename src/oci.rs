@@ -26,8 +26,6 @@ use crate::spec::{Mount, Spec};
 pub struct RealizeInputs<'a> {
     /// The resolved spec (`closure` must be `Some`).
     pub spec: &'a Spec,
-    /// Absolute in-store executable — becomes `argv[0]` (from `resolve_exec`).
-    pub exe: &'a Path,
     /// Rootfs path, relative to the bundle dir (e.g. `"rootfs"`).
     pub rootfs_rel: &'a str,
     /// Host uid/gid that container-root (0) maps to (1:1 as M0).
@@ -136,8 +134,11 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
     // env, verbatim. The engine merges nothing; an absent PATH is just absent.
     let env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
-    // argv: resolved absolute exe as argv[0], then the declared args.
-    let mut argv = vec![input.exe.to_string_lossy().into_owned()];
+    // argv: the declared executable as argv[0] (a bare name or an absolute store
+    // path), then the declared args. The runtime resolves a bare name against
+    // the container's PATH in-sandbox — so only in-closure binaries are found,
+    // and a relocated `dest` path (which exists only inside) resolves too.
+    let mut argv = vec![spec.exec.executable.clone()];
     argv.extend(spec.exec.args.iter().cloned());
 
     let process = ProcessBuilder::default()

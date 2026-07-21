@@ -1,5 +1,8 @@
 //! `resolve()` — turn a spec with `closure: None` into one with `closure:
-//! Some`, and resolve `exec` *within* that closure.
+//! Some`. This computes *the filesystem* (the store paths to bind); it does not
+//! touch the `exec` target — that is resolved by the runtime against the
+//! container's `PATH` at launch, in-sandbox, so only in-closure binaries are
+//! found (no host-side lookup, which would search the host's full store).
 //!
 //! The closure has exactly **two declared seed kinds** (`docs/spec.md`):
 //!
@@ -7,18 +10,17 @@
 //! closure = closure_of(root) ∪ ⋃ closure_of(source)   for each store/overlay mount
 //! ```
 //!
-//! Nothing is inferred from the command line: `exec` is *resolved against* the
-//! closure (found via `env.PATH`, asserted under a closure path) and errors if
-//! absent — it never expands the closure. A present `closure` short-circuits
-//! the whole query (the sealed fast-path); `exec` is still resolved against it,
-//! host-side, no Nix call.
+//! Nothing is inferred from the command line: `exec` never *expands* the closure
+//! (there is no exe-derived closure) — a target outside the closure simply isn't
+//! present in the sandbox and fails at exec. A present `closure` short-circuits
+//! the whole query (the sealed fast-path), no Nix call.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 
-use crate::closure::{closure_of, store_root, validate_closure, which};
+use crate::closure::{closure_of, validate_closure};
 use crate::spec::{Resolved, Spec, StorePath};
 
 /// The declared seeds of a spec: `root` plus every store/overlay mount source.
@@ -58,10 +60,11 @@ pub fn resolve(spec: &mut Spec) -> Result<()> {
 /// * **New seeds beyond the stamp** (a `--mount store:` override, or a
 ///   hand-edited sealed spec) → the sealed set cannot cover them, so the seal
 ///   **breaks**: delta-recompute — query *only* the added seeds and union their
-///   closure onto the sealed set — and warn. This is the chosen seal-break
-///   policy (see the seal-break question in `docs/execution-modes.md`). Closure
-///   is additive, so the union equals a full re-resolve when the seal is honest,
-///   while still skipping the (large) re-query of `root`'s closure.
+///   closure onto the sealed set. Done **silently**: the explicit `--mount
+///   store:` opt-in is itself the signal, so no warning (the chosen answer to
+///   the seal-break question in `docs/execution-modes.md`). Closure is additive,
+///   so the union equals a full re-resolve when the seal is honest, while still
+///   skipping the (large) re-query of `root`'s closure.
 /// * **Seeds only removed/changed, none added** → the extra sealed paths are
 ///   harmless; warn about drift and proceed with the sealed set as-is.
 fn resolve_sealed(spec: &mut Spec, seeds: Vec<StorePath>) -> Result<()> {
@@ -87,11 +90,8 @@ fn resolve_sealed(spec: &mut Spec, seeds: Vec<StorePath>) -> Result<()> {
         return Ok(());
     }
 
-    eprintln!(
-        "pierogi: warning: {} new store seed(s) not covered by the sealed closure; \
-         breaking the seal and recomputing (this run is no longer the sealed artifact)",
-        added.len()
-    );
+    // Silent seal-break: the explicit `--mount store:` opt-in is the signal.
+    // Delta-recompute over the added seeds only and union onto the sealed set.
     for p in closure_of(&added)? {
         let sp = StorePath::new(p).context("delta closure contained a non-top-level store path")?;
         paths.insert(sp);
@@ -101,58 +101,6 @@ fn resolve_sealed(spec: &mut Spec, seeds: Vec<StorePath>) -> Result<()> {
         paths: paths.into_iter().collect(), // BTreeSet iterates sorted
     });
     Ok(())
-}
-
-/// Resolve `exec` to the absolute in-store executable that becomes `argv[0]`.
-///
-/// Requires a resolved spec. `executable` is a bare name (looked up via
-/// `env.PATH`) or an absolute store path; either way it is canonicalized and
-/// asserted to live under one of the closure's paths. Never a source for the
-/// closure — absent ⇒ hard error.
-pub fn resolve_exec(spec: &Spec) -> Result<PathBuf> {
-    let closure = spec
-        .closure
-        .as_ref()
-        .context("resolve_exec called on an unresolved spec")?;
-
-    let exe = &spec.exec.executable;
-    let candidate = if exe.contains('/') {
-        PathBuf::from(exe)
-    } else {
-        let path = spec.env.get("PATH").map(String::as_str).unwrap_or("");
-        which(path, exe).with_context(|| {
-            format!("`{exe}` not found on env.PATH (a store mount folds the closure but does not extend PATH)")
-        })?
-    };
-
-    // Canonicalize to *validate* — follow symlinks to the real store file and
-    // assert it lives in the closure. This must NOT become argv[0]: for a
-    // multi-call binary (coreutils, busybox) `bin/ls` canonicalizes to
-    // `bin/coreutils`, and argv[0]'s basename is how the dispatcher picks the
-    // applet. So we keep the *found* path as argv[0].
-    let canon = std::fs::canonicalize(&candidate)
-        .with_context(|| format!("canonicalizing exec {}", candidate.display()))?;
-    let in_closure = |p: &std::path::Path| {
-        store_root(p)
-            .map(|root| closure.paths.iter().any(|c| c.as_path() == root))
-            .unwrap_or(false)
-    };
-    if !in_closure(&canon) {
-        bail!(
-            "exec {} resolves to {} which is not in the resolved closure",
-            exe,
-            canon.display()
-        );
-    }
-
-    // argv[0]: prefer the found path (preserves the applet name for multi-call
-    // binaries) when it too lives in-closure and thus exists in the sandbox;
-    // otherwise fall back to the canonical target (validated in-closure above).
-    if in_closure(&candidate) {
-        Ok(candidate)
-    } else {
-        Ok(canon)
-    }
 }
 
 /// Build a `Resolved` from a **supplied** closure list (no query): the build-

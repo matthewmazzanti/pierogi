@@ -13,7 +13,7 @@
 //! back to a query.
 
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -25,31 +25,6 @@ use crate::spec::StorePath;
 /// which swamps the runtime-backend startup we want to measure — precompute the
 /// closure once and feed it in here to isolate that. Not for production use.
 const CLOSURE_OVERRIDE_ENV: &str = "PIEROGI_CLOSURE";
-
-/// Look up `cmd` against a `:`-separated `PATH` string, returning the first
-/// `dir/cmd` that is a file.
-pub fn which(path: &str, cmd: &str) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .map(|dir| dir.join(cmd))
-        .find(|full| full.is_file())
-}
-
-/// Reduce any path inside the store to its top-level store path
-/// (`/nix/store/<hash-name>`), which is what `nix-store` queries operate on.
-pub fn store_root(path: &Path) -> Result<PathBuf> {
-    let mut normal = path.components().filter_map(|c| match c {
-        Component::Normal(p) => Some(p.to_owned()),
-        _ => None,
-    });
-
-    let (nix, store, name) = (normal.next(), normal.next(), normal.next());
-    match (nix.as_deref(), store.as_deref(), name) {
-        (Some(n), Some(s), Some(name)) if n == "nix" && s == "store" => {
-            Ok(Path::new("/nix/store").join(name))
-        }
-        _ => bail!("not a store path: {}", path.display()),
-    }
-}
 
 /// Compute the transitive runtime closure (requisites) of all `seeds`, deduped.
 ///

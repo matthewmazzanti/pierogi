@@ -9,10 +9,9 @@
 //!   (`Mount::store_refs` is `None` for both), so they layer on without a query
 //!   and without tripping a sealed spec's drift check.
 //! * a **store** mount adds a closure seed. On an *unsealed* spec `resolve()`'s
-//!   live query picks it up for free; on a *sealed* spec it breaks the seal and
-//!   triggers a delta-recompute — the seal-break policy `resolve()` implements
-//!   (warn + recompute). Parsing here is closure-agnostic; that split lives in
-//!   `resolve()`.
+//!   live query picks it up for free; on a *sealed* spec it silently breaks the
+//!   seal and delta-recomputes (the `--mount store:` opt-in is the signal).
+//!   Parsing here is closure-agnostic; that split lives in `resolve()`.
 //!
 //! `--mount overlay:…` is still rejected — its realization is deferred within M1
 //! (`crate::oci::build_spec` bails on `Mount::Overlay`).
