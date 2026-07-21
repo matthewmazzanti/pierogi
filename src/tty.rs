@@ -21,7 +21,7 @@
 //! `SIGWINCH` handler (which must be async-signal-safe).
 
 use std::io::IoSliceMut;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread::JoinHandle;
@@ -38,7 +38,6 @@ use nix::sys::termios::{self, SetArg};
 use nix::unistd::{isatty, pipe, read, write};
 
 const STDIN: RawFd = 0;
-const STDOUT: RawFd = 1;
 
 /// Write-end of the control pipe, published for the async-signal `SIGWINCH`
 /// handler. `-1` when no relay is active. The handler only ever `write()`s a
@@ -149,7 +148,9 @@ fn accept_master(listener: &OwnedFd, ctl_read: &OwnedFd) -> Result<Option<OwnedF
 /// The bidirectional copy loop: stdin → master, master → stdout, until the
 /// master (pty) closes or we're told to quit.
 fn relay(master: &OwnedFd, ctl_read: &OwnedFd) -> Result<()> {
-    let stdin = unsafe { BorrowedFd::borrow_raw(STDIN) };
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let stdin_fd = stdin.as_fd();
     let mut buf = [0u8; 4096];
     let mut stdin_open = true;
     loop {
@@ -158,7 +159,7 @@ fn relay(master: &OwnedFd, ctl_read: &OwnedFd) -> Result<()> {
             PollFd::new(ctl_read.as_fd(), PollFlags::POLLIN),
         ];
         if stdin_open {
-            pfds.push(PollFd::new(stdin, PollFlags::POLLIN));
+            pfds.push(PollFd::new(stdin_fd, PollFlags::POLLIN));
         }
         if !wait(&mut pfds)? {
             continue; // EINTR
@@ -181,7 +182,7 @@ fn relay(master: &OwnedFd, ctl_read: &OwnedFd) -> Result<()> {
         // the session.
         if has(&pfds[0], PollFlags::POLLIN) {
             match retry(|| read(master, &mut buf)) {
-                Ok(n) if n > 0 => write_all(unsafe { BorrowedFd::borrow_raw(STDOUT) }, &buf[..n]),
+                Ok(n) if n > 0 => write_all(&stdout, &buf[..n]),
                 _ => break,
             }
         }
@@ -193,7 +194,7 @@ fn relay(master: &OwnedFd, ctl_read: &OwnedFd) -> Result<()> {
         // keeps running until its pty closes.
         if stdin_open {
             if has(&pfds[2], PollFlags::POLLIN) {
-                match retry(|| read(stdin, &mut buf)) {
+                match retry(|| read(stdin_fd, &mut buf)) {
                     Ok(n) if n > 0 => write_all(master, &buf[..n]),
                     _ => stdin_open = false,
                 }
@@ -338,17 +339,17 @@ struct RawModeGuard {
 
 impl RawModeGuard {
     fn enable() -> Self {
-        let stdin = unsafe { BorrowedFd::borrow_raw(STDIN) };
-        if !isatty(stdin).unwrap_or(false) {
+        let stdin = std::io::stdin();
+        if !isatty(&stdin).unwrap_or(false) {
             return RawModeGuard { saved: None };
         }
-        let saved = match termios::tcgetattr(stdin) {
+        let saved = match termios::tcgetattr(&stdin) {
             Ok(t) => t,
             Err(_) => return RawModeGuard { saved: None },
         };
         let mut raw = saved.clone();
         termios::cfmakeraw(&mut raw);
-        let _ = termios::tcsetattr(stdin, SetArg::TCSANOW, &raw);
+        let _ = termios::tcsetattr(&stdin, SetArg::TCSANOW, &raw);
         RawModeGuard { saved: Some(saved) }
     }
 }
@@ -356,8 +357,7 @@ impl RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if let Some(saved) = &self.saved {
-            let stdin = unsafe { BorrowedFd::borrow_raw(STDIN) };
-            let _ = termios::tcsetattr(stdin, SetArg::TCSANOW, saved);
+            let _ = termios::tcsetattr(std::io::stdin(), SetArg::TCSANOW, saved);
         }
     }
 }
