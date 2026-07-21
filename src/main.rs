@@ -33,6 +33,7 @@ mod resolve;
 mod run;
 mod runtime;
 mod spec;
+mod tty;
 
 use std::path::PathBuf;
 

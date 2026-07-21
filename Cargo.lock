@@ -700,6 +700,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -782,6 +783,7 @@ dependencies = [
  "clap",
  "libc",
  "libcontainer",
+ "nix 0.31.3",
  "oci-spec",
  "serde",
  "serde_json",

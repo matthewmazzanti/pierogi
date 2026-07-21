@@ -146,10 +146,12 @@ mod tests {
             exec: Exec {
                 executable: "bash".into(),
                 args: vec![],
+                terminal: false,
             },
             root: StorePath::new(root).unwrap(),
             mounts,
             env: BTreeMap::new(),
+            hostname: "pierogi".into(),
             closure: None,
         }
     }

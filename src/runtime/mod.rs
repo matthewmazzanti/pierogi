@@ -69,12 +69,21 @@ impl Backend {
         }
     }
 
-    /// Run `spec` to completion, returning the container's exit code.
-    pub fn run(self, spec: &Spec, id: &str, bundle: &Path, state: &Path) -> Result<i32> {
+    /// Run `spec` to completion, returning the container's exit code. When the
+    /// spec asks for a terminal, `console_socket` is the path the runtime
+    /// connects to and sends the pty master over (see [`crate::tty`]).
+    pub fn run(
+        self,
+        spec: &Spec,
+        id: &str,
+        bundle: &Path,
+        state: &Path,
+        console_socket: Option<&Path>,
+    ) -> Result<i32> {
         match self {
-            Backend::Youki => youki::run(spec, id, bundle, state),
+            Backend::Youki => youki::run(spec, id, bundle, state, console_socket),
             #[cfg(feature = "crun")]
-            Backend::Crun => crun::run(spec, id, bundle, state),
+            Backend::Crun => crun::run(spec, id, bundle, state, console_socket),
         }
     }
 }

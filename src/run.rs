@@ -16,6 +16,7 @@ use crate::oci::{build_spec, RealizeInputs};
 use crate::resolve::{resolve, resolve_exec, resolve_supplied};
 use crate::runtime::Backend;
 use crate::spec::{Mount, Spec};
+use crate::tty::ConsoleRelay;
 
 /// `pierogi run <spec.json>` — load a spec, resolve it, and launch.
 pub fn run_spec(spec_path: PathBuf, backend: Backend) -> Result<()> {
@@ -73,9 +74,24 @@ fn launch(mut spec: Spec, backend: Backend) -> Result<()> {
         gid,
     })?;
 
+    // A `terminal:true` spec needs a controlling tty: bind a console socket and
+    // start the relay *before* the backend runs, so the runtime can connect and
+    // hand us the pty master as it starts the container.
+    let relay = if spec.exec.terminal {
+        Some(ConsoleRelay::bind(work.join("console.sock"))?)
+    } else {
+        None
+    };
+    let console = relay.as_ref().map(ConsoleRelay::socket_path);
+
     // Drive the backend. youki serializes config.json to the bundle; crun loads
     // the spec from memory. Both block until exit.
-    let result = backend.run(&oci, &id, &bundle, &state);
+    let result = backend.run(&oci, &id, &bundle, &state, console);
+
+    // Restore the terminal (join the relay) before anything else prints.
+    if let Some(relay) = relay {
+        relay.finish();
+    }
 
     // Best-effort cleanup.
     let _ = std::fs::remove_dir_all(&work);

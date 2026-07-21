@@ -77,10 +77,18 @@ pub struct Spec {
     /// of truth for `exec` lookup. The engine merges nothing.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// The sandbox's UTS hostname (OCI `hostname`). Defaults to `pierogi`.
+    #[serde(default = "default_hostname")]
+    pub hostname: String,
     /// The memoized resolution output. `Some` ⇒ engine-ready, no Nix query;
     /// `None` ⇒ `resolve()` computes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closure: Option<Resolved>,
+}
+
+/// The default UTS hostname when a spec omits one.
+fn default_hostname() -> String {
+    "pierogi".to_string()
 }
 
 /// The process to run.
@@ -91,6 +99,12 @@ pub struct Exec {
     pub executable: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Allocate a controlling terminal (OCI `process.terminal`). When `true`
+    /// the runtime sets up a pty and makes it the process's controlling tty,
+    /// enabling job control. Default `false`: inherit the host stdio fds
+    /// directly — a working shell, but no job control.
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 /// The resolved bind set plus its input stamp — the production form of the
@@ -180,6 +194,9 @@ mod tests {
         let spec: Spec = serde_json::from_str(json).unwrap();
         assert!(spec.closure.is_none());
         assert_eq!(spec.mounts.len(), 4);
+        // Defaults when omitted: no terminal, hostname `pierogi`.
+        assert!(!spec.exec.terminal);
+        assert_eq!(spec.hostname, "pierogi");
         // seeds = root + the two store sources (host/tmpfs contribute none)
         let seeds: Vec<_> = spec.mounts.iter().filter_map(Mount::store_refs).collect();
         assert_eq!(seeds.len(), 2);

@@ -8,7 +8,13 @@ use anyhow::{Context, Result};
 use oci_spec::runtime::Spec;
 
 /// Write `config.json`, build + start the container, block until it exits.
-pub fn run(spec: &Spec, id: &str, bundle: &Path, state: &Path) -> Result<i32> {
+pub fn run(
+    spec: &Spec,
+    id: &str,
+    bundle: &Path,
+    state: &Path,
+    console_socket: Option<&Path>,
+) -> Result<i32> {
     use libcontainer::container::builder::ContainerBuilder;
     use libcontainer::syscall::syscall::SyscallType;
     use libcontainer::workload::default::DefaultExecutor;
@@ -20,6 +26,9 @@ pub fn run(spec: &Spec, id: &str, bundle: &Path, state: &Path) -> Result<i32> {
 
     let mut container = ContainerBuilder::new(id.to_string(), SyscallType::default())
         .with_executor(DefaultExecutor {})
+        // When the spec has `terminal:true`, youki connects here and sends the
+        // pty master; our `tty` relay is listening on the other end.
+        .with_console_socket(console_socket)
         .with_root_path(state.to_path_buf())
         .context("setting container state path")?
         .as_init(bundle.to_path_buf())

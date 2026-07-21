@@ -48,7 +48,7 @@ take_error (char **out, libcrun_error_t err, const char *ctx)
 
 int
 pierogi_crun_run (const char *json, const char *state_root, const char *bundle,
-                  const char *id, char **err_out)
+                  const char *id, const char *console_socket, char **err_out)
 {
   libcrun_error_t err = NULL;
   *err_out = NULL;
@@ -65,6 +65,10 @@ pierogi_crun_run (const char *json, const char *state_root, const char *bundle,
   ctx.state_root = state_root;
   ctx.id = id;
   ctx.bundle = bundle; /* root.path in the spec is resolved relative to this */
+  /* NULL unless the spec set process.terminal: then crun connects to this
+   * AF_UNIX path and sends the pty master fd, which our Rust `tty` relay (the
+   * listener at the other end) receives and pumps against the caller's stdio. */
+  ctx.console_socket = console_socket;
   ctx.fifo_exec_wait_fd = -1;
   ctx.detach = false;
   ctx.systemd_cgroup = false;

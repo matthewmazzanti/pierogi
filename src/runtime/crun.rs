@@ -14,17 +14,25 @@ use oci_spec::runtime::Spec;
 
 extern "C" {
     /// Returns the container exit code (>= 0) or a negative error; on error,
-    /// `*err_out` is a malloc'd message we must `libc::free`.
+    /// `*err_out` is a malloc'd message we must `libc::free`. `console_socket`
+    /// is NULL unless the spec requests a terminal.
     fn pierogi_crun_run(
         json: *const c_char,
         state_root: *const c_char,
         bundle: *const c_char,
         id: *const c_char,
+        console_socket: *const c_char,
         err_out: *mut *mut c_char,
     ) -> i32;
 }
 
-pub fn run(spec: &Spec, id: &str, bundle: &Path, state: &Path) -> Result<i32> {
+pub fn run(
+    spec: &Spec,
+    id: &str,
+    bundle: &Path,
+    state: &Path,
+    console_socket: Option<&Path>,
+) -> Result<i32> {
     // youki resolves `root.path` against the bundle dir; libcrun resolves it
     // against the *cwd* (the transparent `bundle` context field is not a
     // chdir). Give crun an absolute rootfs so it doesn't depend on cwd.
@@ -39,6 +47,11 @@ pub fn run(spec: &Spec, id: &str, bundle: &Path, state: &Path) -> Result<i32> {
     let c_state = CString::new(state.to_string_lossy().as_bytes())?;
     let c_bundle = CString::new(bundle.to_string_lossy().as_bytes())?;
     let c_id = CString::new(id)?;
+    // NULL → no terminal; a path → crun connects and sends the pty master there.
+    let c_console = console_socket
+        .map(|p| CString::new(p.to_string_lossy().as_bytes()))
+        .transpose()?;
+    let console_ptr = c_console.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
 
     let mut err: *mut c_char = std::ptr::null_mut();
     let ret = unsafe {
@@ -47,6 +60,7 @@ pub fn run(spec: &Spec, id: &str, bundle: &Path, state: &Path) -> Result<i32> {
             c_state.as_ptr(),
             c_bundle.as_ptr(),
             c_id.as_ptr(),
+            console_ptr,
             &mut err,
         )
     };

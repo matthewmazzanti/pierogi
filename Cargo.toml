@@ -21,6 +21,11 @@ crun = []
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+# Safe wrappers for the console-terminal relay (src/tty.rs): AF_UNIX sockets,
+# SCM_RIGHTS fd passing, poll, termios, signal masks. Keeps the fiddly cmsg
+# parsing out of hand-rolled unsafe. (libc stays for the winsize ioctl and the
+# async-signal-safe write in the SIGWINCH handler.)
+nix = { version = "0.31", features = ["socket", "uio", "poll", "term", "signal", "fs"] }
 # youki, driven in-process. oci-spec is pinned to the major libcontainer 0.6
 # depends on (^0.9) so the spec types are shared, not two incompatible copies.
 libcontainer = "0.6"

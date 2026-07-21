@@ -77,6 +77,14 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
     // mode), so we only mount the /dev tmpfs and let it.
     let mut mounts = base_mounts()?;
 
+    // A controlling terminal needs a devpts instance in the container's /dev so
+    // the runtime can allocate the pty (open /dev/ptmx → grantpt). No `gid=` —
+    // only container-gid 0 is mapped in our 1:1 userns, so the usual `gid=5`
+    // (tty) would be unmapped and EINVAL the mount.
+    if spec.exec.terminal {
+        mounts.push(devpts_mount()?);
+    }
+
     // The closure: one ro identity bind per path under /nix/store. Emitted
     // first so any relocated/overlay lower exists before it's referenced.
     for path in &closure.paths {
@@ -133,7 +141,7 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
     argv.extend(spec.exec.args.iter().cloned());
 
     let process = ProcessBuilder::default()
-        .terminal(false) // inherit the host stdio (so an interactive tty works)
+        .terminal(spec.exec.terminal) // spec-driven; false = inherit host stdio
         .user(user)
         .args(argv)
         .env(env)
@@ -147,7 +155,7 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
 
     Ok(SpecBuilder::default()
         .version("1.1.0")
-        .hostname("pierogi")
+        .hostname(spec.hostname.clone())
         .root(root)
         .process(process)
         .mounts(mounts)
@@ -174,6 +182,21 @@ fn base_mounts() -> Result<Vec<OciMount>> {
             ])
             .build()?,
     ])
+}
+
+fn devpts_mount() -> Result<OciMount> {
+    Ok(MountBuilder::default()
+        .destination(PathBuf::from("/dev/pts"))
+        .source(PathBuf::from("devpts"))
+        .typ("devpts".to_string())
+        .options(vec![
+            "nosuid".into(),
+            "noexec".into(),
+            "newinstance".into(),
+            "ptmxmode=0666".into(),
+            "mode=0620".into(),
+        ])
+        .build()?)
 }
 
 fn tmpfs_mount(dest: &Path) -> Result<OciMount> {
