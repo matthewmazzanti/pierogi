@@ -28,25 +28,13 @@ fn seeds(spec: &Spec) -> Vec<StorePath> {
     seeds
 }
 
-/// Fill `spec.closure` if absent. A present closure short-circuits the query;
-/// we only run a cheap, query-free drift check on its stamp.
+/// Fill `spec.closure` if absent. A present closure short-circuits the full
+/// query (see [`resolve_sealed`] for the sealed-spec cases).
 pub fn resolve(spec: &mut Spec) -> Result<()> {
     let seeds = seeds(spec);
 
-    if let Some(closure) = &spec.closure {
-        // Sealed fast-path: no query. Query-free drift check — `from` is the
-        // seed set this closure was stamped from; if it no longer matches the
-        // declared seeds, the spec drifted. Policy (error/warn/allow) is
-        // deferred (see docs); v0 warns and proceeds.
-        let stamped: BTreeSet<_> = closure.from.iter().collect();
-        let declared: BTreeSet<_> = seeds.iter().collect();
-        if stamped != declared {
-            eprintln!(
-                "pierogi: warning: closure.from does not match declared seeds \
-                 (spec may have drifted since it was resolved)"
-            );
-        }
-        return Ok(());
+    if spec.closure.is_some() {
+        return resolve_sealed(spec, seeds);
     }
 
     // v0: identity-bind the whole closure — no relocated-seed drop yet (that
@@ -60,6 +48,58 @@ pub fn resolve(spec: &mut Spec) -> Result<()> {
     paths.sort();
 
     spec.closure = Some(Resolved { from: seeds, paths });
+    Ok(())
+}
+
+/// Handle a spec that already carries a `closure`, comparing its stamp
+/// (`closure.from`) against the currently declared `seeds`:
+///
+/// * **Seeds unchanged** → sealed fast-path: no query at all.
+/// * **New seeds beyond the stamp** (a `--mount store:` override, or a
+///   hand-edited sealed spec) → the sealed set cannot cover them, so the seal
+///   **breaks**: delta-recompute — query *only* the added seeds and union their
+///   closure onto the sealed set — and warn. This is the chosen seal-break
+///   policy (see the seal-break question in `docs/execution-modes.md`). Closure
+///   is additive, so the union equals a full re-resolve when the seal is honest,
+///   while still skipping the (large) re-query of `root`'s closure.
+/// * **Seeds only removed/changed, none added** → the extra sealed paths are
+///   harmless; warn about drift and proceed with the sealed set as-is.
+fn resolve_sealed(spec: &mut Spec, seeds: Vec<StorePath>) -> Result<()> {
+    let closure = spec
+        .closure
+        .as_ref()
+        .expect("caller checked closure is present");
+    let stamped: BTreeSet<StorePath> = closure.from.iter().cloned().collect();
+    let mut paths: BTreeSet<StorePath> = closure.paths.iter().cloned().collect();
+    // `closure` (the &spec.closure borrow) is unused past here, so we may
+    // reassign `spec.closure` below.
+
+    let declared: BTreeSet<StorePath> = seeds.iter().cloned().collect();
+    let added: Vec<StorePath> = declared.difference(&stamped).cloned().collect();
+
+    if added.is_empty() {
+        if declared != stamped {
+            eprintln!(
+                "pierogi: warning: closure.from does not match declared seeds \
+                 (spec may have drifted since it was resolved)"
+            );
+        }
+        return Ok(());
+    }
+
+    eprintln!(
+        "pierogi: warning: {} new store seed(s) not covered by the sealed closure; \
+         breaking the seal and recomputing (this run is no longer the sealed artifact)",
+        added.len()
+    );
+    for p in closure_of(&added)? {
+        let sp = StorePath::new(p).context("delta closure contained a non-top-level store path")?;
+        paths.insert(sp);
+    }
+    spec.closure = Some(Resolved {
+        from: seeds,
+        paths: paths.into_iter().collect(), // BTreeSet iterates sorted
+    });
     Ok(())
 }
 
@@ -237,5 +277,45 @@ mod tests {
         // No Nix daemon is touched: a present closure returns Ok unchanged.
         resolve(&mut spec).unwrap();
         assert_eq!(spec.closure.as_ref().unwrap().paths.len(), 1);
+    }
+
+    #[test]
+    fn resolve_delta_recomputes_when_store_seed_added_to_sealed() {
+        // A spec sealed to just `root`, now carrying an extra store mount seed
+        // (as a `--mount store:` override would leave it).
+        let mut spec = spec_with(
+            "/nix/store/aaaa-root",
+            vec![Mount::Store {
+                source: StorePath::new("/nix/store/bbbb-tool").unwrap(),
+                dest: None,
+            }],
+        );
+        spec.closure = Some(Resolved {
+            from: vec![StorePath::new("/nix/store/aaaa-root").unwrap()],
+            paths: vec![StorePath::new("/nix/store/aaaa-root").unwrap()],
+        });
+
+        // The added seed's closure is *supplied* via the stub — no nix daemon.
+        // Only this test drives `closure_of` live, so the process-global env is
+        // uncontended.
+        std::env::set_var(
+            "PIEROGI_CLOSURE",
+            "/nix/store/bbbb-tool:/nix/store/dddd-dep",
+        );
+        resolve(&mut spec).unwrap();
+        std::env::remove_var("PIEROGI_CLOSURE");
+
+        let c = spec.closure.as_ref().unwrap();
+        // Delta unioned onto the sealed set (root) + restamped to all seeds.
+        let paths: Vec<String> = c.paths.iter().map(|p| p.to_string()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/nix/store/aaaa-root",
+                "/nix/store/bbbb-tool",
+                "/nix/store/dddd-dep"
+            ]
+        );
+        assert_eq!(c.from.len(), 2); // root + tool
     }
 }

@@ -23,8 +23,9 @@ use crate::tty::ConsoleRelay;
 /// overrides, resolve, and launch.
 pub fn run_spec(spec_path: PathBuf, backend: Backend, overrides: Overrides) -> Result<()> {
     let mut spec = load_spec(&spec_path)?;
-    // Overlay CLI overrides before resolve: runtime-only rewrites, so the
-    // closure is untouched (an argv override still resolves within it).
+    // Overlay CLI overrides before resolve so the closure step sees them: an
+    // argv override resolves within the closure, and a store mount adds a seed
+    // (folded live, or breaking a sealed spec's seal — see `resolve`).
     if !overrides.is_empty() {
         eprintln!("pierogi: applying CLI overrides to {}", spec_path.display());
         overrides.apply(&mut spec);

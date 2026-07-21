@@ -54,8 +54,9 @@ enum Cmd {
     /// a `closure:`, it launches with no Nix query.
     ///
     /// CLI overrides overlay onto the loaded spec before it runs (the `run`
-    /// bridge). This slice is runtime-only — env, hostname, argv, and additive
-    /// host/tmpfs mounts — so none re-trigger the closure query.
+    /// bridge): env, hostname, argv, and additive host/tmpfs/store mounts. Most
+    /// are runtime-only; a `--mount store:` adds a closure seed (folded live, or
+    /// breaking a sealed spec's seal with a delta-recompute).
     Run {
         /// Runtime backend: `crun` (default, needs the `crun` build feature) or
         /// `youki`. Omit to use the default.
@@ -70,8 +71,9 @@ enum Cmd {
         #[arg(long, value_name = "NAME")]
         hostname: Option<String>,
 
-        /// Add a mount (repeatable): `host:SRC:DEST[:rw|:ro]` or `tmpfs:DEST`.
-        /// Store mounts are not overridable (they would break a sealed spec).
+        /// Add a mount (repeatable): `host:SRC:DEST[:rw|:ro]`, `tmpfs:DEST`, or
+        /// `store:SRC[:DEST]`. A store mount on a sealed spec breaks the seal
+        /// and delta-recomputes the closure.
         #[arg(long = "mount", value_name = "SPEC")]
         mount: Vec<String>,
 
