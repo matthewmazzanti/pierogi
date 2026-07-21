@@ -1,9 +1,17 @@
 # M1 nix-mode artifact — the tire-kicking version.
 #
-# Produces a **self-contained resolved `spec.json`** store path for a static
-# bash + coreutils sandbox with a hand-rolled `/etc`. Deliberately explicit and
-# hardcoded — no `mkSandbox` abstraction yet; that extraction comes once this
-# pipeline is proven. The pipeline it exercises:
+# Returns two spec.json store paths for a static bash + coreutils sandbox with a
+# hand-rolled `/etc`:
+#
+#   * `resolved`   — the **self-contained sealed** spec (closure stamped in, no
+#                    runtime query). The real nix-mode artifact.
+#   * `unresolved` — the sources-only spec (no `closure:`). For shell iteration:
+#                    `pierogi run` on it resolves the closure with a live
+#                    `nix-store --query --requisites` at run time, so you can
+#                    tweak and re-run without rebuilding the sealed artifact.
+#
+# Deliberately explicit and hardcoded — no `mkSandbox` abstraction yet; that
+# extraction comes once this pipeline is proven. The pipeline it exercises:
 #
 #   root (buildEnv + baked /etc)                  the filesystem seed
 #     │
@@ -63,6 +71,7 @@ let
     exec = {
       executable = "bash";
       args = [ "--norc" ];
+      terminal = true;
     };
     root = "${root}";
     mounts = [
@@ -87,8 +96,15 @@ let
   closure = pkgs.closureInfo { rootPaths = [ root ]; };
 
 in
-# 4. Stamp: supplied closure, no query. $out is the resolved spec.json itself.
-pkgs.runCommand "pierogi-bash-sandbox.json" { } ''
-  ${pierogi}/bin/pierogi resolve ${unresolvedSpecFile} \
-    --closure ${closure}/store-paths > $out
-''
+{
+  # The sources-only spec. Its `root` is a reference, so building this realizes
+  # the closure into the store — the live `nix-store` query at run time then has
+  # everything to resolve against.
+  unresolved = unresolvedSpecFile;
+
+  # 4. Stamp: supplied closure, no query. $out is the resolved spec.json itself.
+  resolved = pkgs.runCommand "pierogi-bash-sandbox.json" { } ''
+    ${pierogi}/bin/pierogi resolve ${unresolvedSpecFile} \
+      --closure ${closure}/store-paths > $out
+  '';
+}
