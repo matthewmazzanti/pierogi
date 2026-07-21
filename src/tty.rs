@@ -207,28 +207,33 @@ fn relay(master: &OwnedFd, wake: &EventFd, quit: &EventFd) -> Result<()> {
             copy_winsize(master.as_raw_fd());
         }
 
-        // Master → stdout. A closed slave surfaces as EIO / POLLHUP; either ends
-        // the session.
-        if has(master_pf, PollFlags::POLLIN) {
+        // Master → stdout. Read whenever readable *or* hung up, and let the read
+        // result decide: a positive count means more may remain (loop, re-poll,
+        // re-read); 0 or EIO means the pty is drained and the session is over.
+        // Never break on POLLHUP alone — POLLIN|POLLHUP arrive together while
+        // output is still buffered, so breaking there would truncate the tail.
+        if has(
+            master_pf,
+            PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+        ) {
             match retry(|| read(master, &mut buf)) {
                 Ok(n) if n > 0 => write_all(&stdout, &buf[..n]),
                 _ => break,
             }
         }
-        if has(master_pf, PollFlags::POLLHUP | PollFlags::POLLERR) {
-            break;
-        }
 
-        // Stdin → master. Our own EOF just stops that direction (drops stdin from
-        // the poll set next iteration); the container keeps running.
+        // Stdin → master, same shape. Our own EOF (read returns 0) just stops
+        // this direction — drop stdin from the poll set next iteration; the
+        // container keeps running until its own pty closes.
         if let Some(stdin_pf) = stdin_pf.first() {
-            if has(stdin_pf, PollFlags::POLLIN) {
+            if has(
+                stdin_pf,
+                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+            ) {
                 match retry(|| read(stdin_fd, &mut buf)) {
                     Ok(n) if n > 0 => write_all(master, &buf[..n]),
                     _ => stdin_open = false,
                 }
-            } else if has(stdin_pf, PollFlags::POLLHUP | PollFlags::POLLERR) {
-                stdin_open = false;
             }
         }
     }
