@@ -196,14 +196,17 @@ fn relay(master: &OwnedFd, wake: &EventFd, quit: &EventFd) -> Result<()> {
             unreachable!("relay always polls master, wake, and quit");
         };
 
-        // Quit → stop; drain the counter first (tidy, though we're leaving).
+        // Quit → drain the counter (disarm) and stop. The read can't fail here —
+        // POLLIN means the counter is > 0 and we're its only reader — so `?` only
+        // ever fires on a genuine bug (e.g. EBADF), which beats swallowing it.
         if has(quit_pf, PollFlags::POLLIN) {
-            let _ = quit.read();
+            quit.read().context("draining quit eventfd")?;
             break;
         }
-        // Resize → drain the counter and re-propagate the window size.
+        // Resize → drain (coalescing any SIGWINCH burst into one) and
+        // re-propagate the window size. Same reasoning as quit for the `?`.
         if has(wake_pf, PollFlags::POLLIN) {
-            let _ = wake.read();
+            wake.read().context("draining resize eventfd")?;
             copy_winsize(master.as_raw_fd());
         }
 
@@ -218,7 +221,12 @@ fn relay(master: &OwnedFd, wake: &EventFd, quit: &EventFd) -> Result<()> {
         ) {
             match retry(|| read(master, &mut buf)) {
                 Ok(n) if n > 0 => write_all(&stdout, &buf[..n]),
-                _ => break,
+                // Slave closed: a pty master reports that as EIO (portably, a
+                // 0-length read). The normal end of the session, not a fault.
+                Ok(_) | Err(Errno::EIO) => break,
+                // Anything else (EBADF, EFAULT, …) is our bug — surface it
+                // rather than passing it off as a clean exit.
+                Err(e) => return Err(e).context("reading the pty master"),
             }
         }
 
@@ -232,7 +240,10 @@ fn relay(master: &OwnedFd, wake: &EventFd, quit: &EventFd) -> Result<()> {
             ) {
                 match retry(|| read(stdin_fd, &mut buf)) {
                     Ok(n) if n > 0 => write_all(master, &buf[..n]),
-                    _ => stdin_open = false,
+                    // Input ended (pipe EOF, or the outer tty went away → EIO).
+                    // Stop this direction; the container keeps running.
+                    Ok(_) | Err(Errno::EIO) => stdin_open = false,
+                    Err(e) => return Err(e).context("reading stdin"),
                 }
             }
         }
