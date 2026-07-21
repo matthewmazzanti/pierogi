@@ -13,14 +13,22 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::oci::{build_spec, RealizeInputs};
+use crate::overrides::Overrides;
 use crate::resolve::{resolve, resolve_exec, resolve_supplied};
 use crate::runtime::Backend;
 use crate::spec::{Mount, Spec};
 use crate::tty::ConsoleRelay;
 
-/// `pierogi run <spec.json>` — load a spec, resolve it, and launch.
-pub fn run_spec(spec_path: PathBuf, backend: Backend) -> Result<()> {
-    let spec = load_spec(&spec_path)?;
+/// `pierogi run [overrides] <spec.json>` — load a spec, overlay any CLI
+/// overrides, resolve, and launch.
+pub fn run_spec(spec_path: PathBuf, backend: Backend, overrides: Overrides) -> Result<()> {
+    let mut spec = load_spec(&spec_path)?;
+    // Overlay CLI overrides before resolve: runtime-only rewrites, so the
+    // closure is untouched (an argv override still resolves within it).
+    if !overrides.is_empty() {
+        eprintln!("pierogi: applying CLI overrides to {}", spec_path.display());
+        overrides.apply(&mut spec);
+    }
     launch(spec, backend)
 }
 

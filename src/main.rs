@@ -29,6 +29,7 @@
 
 mod closure;
 mod oci;
+mod overrides;
 mod resolve;
 mod run;
 mod runtime;
@@ -51,14 +52,36 @@ struct Cli {
 enum Cmd {
     /// Run a sandbox from a spec: `pierogi run <spec.json>`. If the spec carries
     /// a `closure:`, it launches with no Nix query.
+    ///
+    /// CLI overrides overlay onto the loaded spec before it runs (the `run`
+    /// bridge). This slice is runtime-only — env, hostname, argv, and additive
+    /// host/tmpfs mounts — so none re-trigger the closure query.
     Run {
         /// Runtime backend: `crun` (default, needs the `crun` build feature) or
         /// `youki`. Omit to use the default.
         #[arg(long)]
         runtime: Option<String>,
 
+        /// Override/insert an env var (repeatable): `--env KEY=VALUE`.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// Override the UTS hostname.
+        #[arg(long, value_name = "NAME")]
+        hostname: Option<String>,
+
+        /// Add a mount (repeatable): `host:SRC:DEST[:rw|:ro]` or `tmpfs:DEST`.
+        /// Store mounts are not overridable (they would break a sealed spec).
+        #[arg(long = "mount", value_name = "SPEC")]
+        mount: Vec<String>,
+
         /// Path to a pierogi `spec.json`.
         spec: PathBuf,
+
+        /// Override the exec: everything after `--` becomes the argv (the first
+        /// element is the executable, resolved within the spec's closure).
+        #[arg(last = true, value_name = "CMD")]
+        argv: Vec<String>,
     },
 
     /// Freeze a spec: fill `closure:` and print the resolved spec. With
@@ -88,9 +111,17 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Run { runtime, spec } => {
+        Cmd::Run {
+            runtime,
+            env,
+            hostname,
+            mount,
+            spec,
+            argv,
+        } => {
             let backend = runtime::Backend::select(runtime.as_deref())?;
-            run::run_spec(spec, backend)
+            let overrides = overrides::Overrides::parse(env, hostname, mount, argv)?;
+            run::run_spec(spec, backend, overrides)
         }
         Cmd::Resolve { spec, closure } => run::resolve_cmd(spec, closure),
     }
