@@ -74,11 +74,12 @@ is opaque). See [JSON serialization](#json-serialization) for the concrete shape
   never a source for it** — found within the resolved closure or a hard error.
   There is no exe-derived closure.
 - **`root`** — a single, **required** store path. It is the base closure seed
-  (`closure_of(root)`) and where `PATH` conventionally points. **Distinct from
-  mounts** by role, not by mechanism: in v0 its filesystem contribution is
-  identical to a store mount (bound under `/nix/store` like any closure path);
-  its distinction is *seed + PATH base*. Injected by `wrap` (its baked base),
-  declared by an authored config or a Nix build.
+  (`closure_of(root)`) and where `PATH` conventionally points. Injected by
+  `wrap` (its baked base), declared by an authored config or a Nix build.
+  > **Superseded on the sealed-rootfs branch:** `root` is no longer "bound under
+  > `/nix/store` like any closure path." It *is* the rootfs — the FHS-root
+  > mounted at `/`, carrying `/etc`, `/bin`, and every baked mountpoint, and
+  > excluded from the identity binds. See [Sealed rootfs](#sealed-rootfs-implemented-on-the-sealed-rootfs-branch).
 - **`mounts`** — additive binds layered onto the root. See the `Mount` model
   below.
 - **`env`** — producer-filled key/values. `PATH` lives here and is the single
@@ -261,8 +262,33 @@ graph, so it's no shortcut.)
   tmpfs when omitted). Emitted *after* the closure binds so `lowerdir` exists.
 - `exec` → `process.args` (with the resolved absolute path as `argv[0]`).
 - `env` → `process.env`, verbatim.
-- OCI `root.path` is the **empty scaffold**, not `root` — `root` lives in the
-  closure like any store path.
+- OCI `root.path` **is `root`** — the sealed rootfs store path, mounted at `/`
+  and remounted read-only. `root` carries the whole skeleton (`/etc`, `/bin`,
+  and the `/proc`, `/dev`, `/tmp`, `/nix/store/<hash>` mountpoint dirs), baked at
+  build time by the root derivation, so there is **no empty scaffold to
+  assemble** and no launch-time `mkdir`. `root` is therefore *excluded* from the
+  `/nix/store` identity binds (it's the `/` mount, not a `/nix/store` entry) —
+  see the sealed-rootfs note below.
+
+### Sealed rootfs (implemented on the `sealed-rootfs` branch)
+
+The rootfs is a single store path with the mount topology **frozen at build
+time**. Consequences that supersede parts of this doc:
+
+- **`root` is the rootfs, not a closure bind.** The mountpoint dirs it carries
+  depend on the closure, so the closure is seeded from `root`'s *dependencies*
+  (not `root`), which breaks the circularity: deps are buildable before `root`.
+  `PATH` points at `/bin` (`root`'s own `bin/`, surfaced at `/`), so nothing
+  references `/nix/store/<root-hash>` and `root` needs no self-mountpoint.
+- **No runtime store additions.** A store path added at launch would need a
+  `/nix/store/<hash>` mountpoint the image never baked. So `--mount store:` is
+  gone and a sealed spec that gains a seed **fails loud** (no seal-break /
+  delta-recompute). A different closure means a different image. `--mount host:`
+  / `tmpfs:` still work, but only onto dests the image already baked.
+- **File-vs-dir mountpoints move to build time.** A file store path (e.g. a
+  `writeText` `/etc` file) needs a file mountpoint, a dir needs a dir — the root
+  derivation stats each closure member and bakes the matching kind (what
+  `scaffold_mountpoints` used to do at launch).
 
 ## JSON serialization
 
@@ -415,9 +441,13 @@ Each walks `resolve()` on the spec above's building blocks. `closure_of` is one
   resolv.conf/machine-id per-invocation), and whether an FHS-shaped root needs a
   different `/etc`. Reconcile with the identity sub-schema pinned in
   [architecture.md](architecture.md#spec--rootfs-build-time-vs-runtime).
-- **TODO — `root`-as-mount question.** Whether `root` stays a distinct field or
-  collapses into a first mount. Currently **distinct** (locked for v0); it only
-  becomes structurally special if we add an FHS-root-bound-at-`/` variant.
+- **DECIDED (sealed-rootfs branch) — `root` is the rootfs.** Not "a store path
+  bound under `/nix/store` like any other," but the FHS-root bound at `/`: it
+  carries `/etc`, `/bin`, and every mountpoint, baked at build time, and is
+  excluded from the identity binds. This resolves the old "root-as-mount"
+  question in the opposite direction from the earlier draft — `root` is now
+  *structurally special* (the `/` mount), and its filesystem contribution is no
+  longer identical to a store mount. See [Realization](#realization-what-the-engine-does).
 - **TODO — the rest of the runtime surface.** Namespaces, uid/gid maps,
   hostname/cwd, dbus/seccomp rules — present in the engine today (`src/spec.rs`)
   but not yet folded into this schema's field list. Add per feature/milestone.

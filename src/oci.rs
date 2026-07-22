@@ -2,14 +2,20 @@
 //! spec the backend drives (`docs/spec.md#realization`).
 //!
 //! Realization, field by field:
-//! * `closure.paths` → one read-only identity bind per path under `/nix/store`.
+//! * `closure.paths` → one read-only identity bind per path under `/nix/store`,
+//!   onto mountpoint dirs **pre-baked into `root`** (see below).
 //! * `mounts` → OCI mounts: `Store` (identity = already covered by the closure;
 //!   relocate = one bind at `dest`), `Host` (ro/rw bind), `Tmpfs`. `Overlay` is
 //!   deferred within M1.
 //! * `env` → `process.env`, verbatim. `exec` → `process.args` (resolved
 //!   absolute path as `argv[0]`).
-//! * OCI `root.path` is the empty scaffold, not `root` — `root` lives in the
-//!   closure like any store path.
+//! * OCI `root.path` **is `root`** — the sealed rootfs store path, mounted at
+//!   `/` and remounted read-only. It carries the whole skeleton (`/etc`, `/bin`,
+//!   and the `/proc`, `/dev`, `/tmp`, `/nix/store/<hash>` mountpoint dirs), so
+//!   there is no empty scaffold to assemble. `root` is therefore **excluded**
+//!   from the `/nix/store` identity binds: it is the `/` mount, not a
+//!   `/nix/store/<hash>` entry, and nothing references it by store path
+//!   (`PATH` points at `/bin`, which is `root`'s own `bin/` at `/`).
 
 use std::path::{Path, PathBuf};
 
@@ -26,8 +32,6 @@ use crate::spec::{Mount, Spec};
 pub struct RealizeInputs<'a> {
     /// The resolved spec (`closure` must be `Some`).
     pub spec: &'a Spec,
-    /// Rootfs path, relative to the bundle dir (e.g. `"rootfs"`).
-    pub rootfs_rel: &'a str,
     /// Host uid/gid that container-root (0) maps to (1:1 as M0).
     pub uid: u32,
     pub gid: u32,
@@ -83,9 +87,19 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
         mounts.push(devpts_mount()?);
     }
 
-    // The closure: one ro identity bind per path under /nix/store. Emitted
-    // first so any relocated/overlay lower exists before it's referenced.
+    // The closure: one ro identity bind per path under /nix/store, onto the
+    // mountpoint dirs baked into `root`. Emitted first so any relocated/overlay
+    // lower exists before it's referenced.
+    //
+    // `root` itself is skipped: it's the `/` mount (OCI root.path below), not a
+    // `/nix/store/<hash>` entry, and has no baked self-mountpoint. A live
+    // resolve leaves `root` in `closure.paths` (its query lists it); a supplied
+    // build-time closure seeds from root's *deps* and omits it. Skipping here
+    // makes both sources realize identically.
     for path in &closure.paths {
+        if path == &spec.root {
+            continue;
+        }
         let p = path.to_string();
         mounts.push(bind_mount(&p, &p, &["bind", "ro"])?);
     }
@@ -149,8 +163,12 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
         .cwd(PathBuf::from("/"))
         .build()?;
 
+    // OCI root.path is the `root` store path itself — an absolute path, mounted
+    // at `/` and remounted read-only. Absolute so it's bundle/cwd-independent on
+    // both backends (youki joins it against the bundle, which for an absolute
+    // path yields the path unchanged; crun no longer rewrites it).
     let root = RootBuilder::default()
-        .path(PathBuf::from(input.rootfs_rel))
+        .path(spec.root.as_path().to_path_buf())
         .readonly(true)
         .build()?;
 

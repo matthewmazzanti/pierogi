@@ -2,25 +2,26 @@
 //! `docs/execution-modes.md#run-overrides--rewrites-and-when-they-recompute`).
 //!
 //! Supported overrides: `--env`, `--hostname`, an argv override (trailing
-//! `-- cmd args`), and additive **host / tmpfs / store** mounts.
+//! `-- cmd args`), and additive **host / tmpfs** mounts.
 //!
 //! * `env` / `hostname` / argv rewrite spec fields in place.
 //! * host / tmpfs mounts contribute nothing to `resolve()`'s seeds
 //!   (`Mount::store_refs` is `None` for both), so they layer on without a query
-//!   and without tripping a sealed spec's drift check.
-//! * a **store** mount adds a closure seed. On an *unsealed* spec `resolve()`'s
-//!   live query picks it up for free; on a *sealed* spec it silently breaks the
-//!   seal and delta-recomputes (the `--mount store:` opt-in is the signal).
-//!   Parsing here is closure-agnostic; that split lives in `resolve()`.
+//!   and without tripping a sealed spec's drift check. Their dest mountpoints
+//!   must already exist in the sealed `root` — a runtime mount can bind onto a
+//!   baked mountpoint but cannot create one under the read-only rootfs.
 //!
-//! `--mount overlay:…` is still rejected — its realization is deferred within M1
-//! (`crate::oci::build_spec` bails on `Mount::Overlay`).
+//! **No `--mount store:`.** Adding a store path at runtime would need a fresh
+//! `/nix/store/<hash>` mountpoint the sealed `root` never baked, so the closure
+//! is frozen at build time: a different closure means a different image. See
+//! `docs/execution-modes.md`. `--mount overlay:…` is likewise rejected (its
+//! realization is deferred within M1).
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
-use crate::spec::{Mount, Spec, StorePath};
+use crate::spec::{Mount, Spec};
 
 /// Parsed CLI overrides for the `run` verb.
 #[derive(Debug, Default)]
@@ -104,10 +105,11 @@ fn parse_env(s: &str) -> Result<(String, String)> {
 /// * `host:SRC:DEST` / `host:SRC:DEST:ro` — read-only host bind.
 /// * `host:SRC:DEST:rw` — writable host bind.
 /// * `tmpfs:DEST` — writable scratch.
-/// * `store:SRC` — identity store bind (folds `SRC`'s closure).
-/// * `store:SRC:DEST` — relocated store bind at `DEST`.
 ///
-/// `overlay:…` is rejected (realization deferred within M1).
+/// Both bind onto a mountpoint the sealed `root` must already carry. `store:…`
+/// and `overlay:…` are rejected: a store path added at runtime would need a
+/// `/nix/store/<hash>` mountpoint the image never baked (the closure is frozen
+/// at build time), and overlay realization is deferred within M1.
 fn parse_mount(s: &str) -> Result<Mount> {
     let (kind, rest) = s
         .split_once(':')
@@ -133,23 +135,16 @@ fn parse_mount(s: &str) -> Result<Mount> {
                 rw,
             })
         }
-        "store" => {
-            let parts: Vec<&str> = rest.split(':').collect();
-            let (src, dest) = match parts.as_slice() {
-                [src] => (*src, None),
-                [src, dest] => (*src, Some(abs_dest(dest, s)?)),
-                _ => bail!("--mount store expects store:SRC[:DEST], got `{s}`"),
-            };
-            let source =
-                StorePath::new(src).with_context(|| format!("--mount store source in `{s}`"))?;
-            Ok(Mount::Store { source, dest })
-        }
+        "store" => bail!(
+            "--mount store:… is not supported: the closure is sealed at build \
+             time (a different closure means a different image), got `{s}`"
+        ),
         "overlay" => bail!(
             "--mount overlay:… realization is deferred within M1 \
-             (host / tmpfs / store only)"
+             (host / tmpfs only)"
         ),
         other => {
-            bail!("--mount has unknown kind `{other}` (expected host, tmpfs, or store): `{s}`")
+            bail!("--mount has unknown kind `{other}` (expected host or tmpfs): `{s}`")
         }
     }
 }
@@ -290,28 +285,12 @@ mod tests {
     }
 
     #[test]
-    fn store_mount_parses_identity_and_relocated() {
-        match parse_mount("store:/nix/store/xxxx-tool").unwrap() {
-            Mount::Store { source, dest } => {
-                assert_eq!(source.to_string(), "/nix/store/xxxx-tool");
-                assert!(dest.is_none());
-            }
-            _ => panic!("expected store"),
-        }
-        match parse_mount("store:/nix/store/xxxx-proj:/home/dev/project").unwrap() {
-            Mount::Store { source, dest } => {
-                assert_eq!(source.to_string(), "/nix/store/xxxx-proj");
-                assert_eq!(dest, Some(PathBuf::from("/home/dev/project")));
-            }
-            _ => panic!("expected store"),
-        }
-    }
-
-    #[test]
-    fn store_mount_rejects_bad_source_or_dest() {
-        assert!(parse_mount("store:/etc/passwd").is_err()); // not a store path
-        assert!(parse_mount("store:/nix/store/xxx-tool/bin/x").is_err()); // not top-level
-        assert!(parse_mount("store:/nix/store/xxx-tool:relative").is_err()); // dest not absolute
+    fn store_mount_is_rejected() {
+        // The closure is sealed at build time — no runtime store additions,
+        // regardless of whether the source is a valid store path.
+        assert!(parse_mount("store:/nix/store/xxxx-tool").is_err());
+        assert!(parse_mount("store:/nix/store/xxxx-proj:/home/dev/project").is_err());
+        assert!(parse_mount("store:/etc/passwd").is_err());
     }
 
     #[test]

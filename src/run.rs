@@ -16,7 +16,7 @@ use crate::oci::{build_spec, RealizeInputs};
 use crate::overrides::Overrides;
 use crate::resolve::{resolve, resolve_supplied};
 use crate::runtime::Backend;
-use crate::spec::{Mount, Spec};
+use crate::spec::Spec;
 use crate::tty::ConsoleRelay;
 
 /// `pierogi run [overrides] <spec.json>` — load a spec, overlay any CLI
@@ -59,7 +59,7 @@ fn launch(mut spec: Spec, backend: Backend) -> Result<()> {
 
     let closure = spec.closure.as_ref().expect("resolved above");
     eprintln!(
-        "pierogi: root {} -> closure of {} paths; assembling read-only rootfs",
+        "pierogi: sealed rootfs {} + {} closure binds",
         spec.root,
         closure.paths.len()
     );
@@ -67,18 +67,18 @@ fn launch(mut spec: Spec, backend: Backend) -> Result<()> {
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
-    // Lay out a bundle (config.json + empty rootfs with mountpoints).
+    // Lay out a bundle for config.json + runtime state. There is no rootfs to
+    // scaffold: `root` *is* the rootfs (mounted at `/`), and every mountpoint
+    // the closure and spec mounts need is baked into it. See `oci::build_spec`.
     let id = format!("pierogi-{}", std::process::id());
     let work = runtime_dir().join(&id);
     let bundle = work.join("bundle");
-    let rootfs = bundle.join("rootfs");
     let state = work.join("state");
     std::fs::create_dir_all(&state).with_context(|| format!("mkdir {}", state.display()))?;
-    scaffold_mountpoints(&rootfs, &spec)?;
+    std::fs::create_dir_all(&bundle).with_context(|| format!("mkdir {}", bundle.display()))?;
 
     let oci = build_spec(&RealizeInputs {
         spec: &spec,
-        rootfs_rel: "rootfs",
         uid,
         gid,
     })?;
@@ -108,49 +108,6 @@ fn launch(mut spec: Spec, backend: Backend) -> Result<()> {
     let code = result?;
     eprintln!("pierogi: process exited ({code})");
     Ok(())
-}
-
-/// Pre-create mountpoints in the empty (read-only) rootfs. The runtime creates
-/// the many per-closure-path targets under `/nix/store` itself (as in M0); we
-/// create the skeleton and each additive spec-mount dest.
-fn scaffold_mountpoints(rootfs: &Path, spec: &Spec) -> Result<()> {
-    for sub in ["proc", "dev", "nix/store"] {
-        std::fs::create_dir_all(rootfs.join(sub))?;
-    }
-    for m in &spec.mounts {
-        match m {
-            Mount::Store { dest: None, .. } => {} // covered by the closure
-            Mount::Store {
-                dest: Some(dest), ..
-            }
-            | Mount::Tmpfs { dest }
-            | Mount::Overlay { dest, .. } => {
-                mkdir_under(rootfs, dest)?;
-            }
-            Mount::Host { source, dest, .. } => {
-                // A file source needs a file mountpoint; a dir needs a dir.
-                if source.is_file() {
-                    if let Some(parent) = rooted(rootfs, dest).parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    let _ = std::fs::File::create(rooted(rootfs, dest));
-                } else {
-                    mkdir_under(rootfs, dest)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn rooted(rootfs: &Path, dest: &Path) -> PathBuf {
-    // dest is absolute (`/tmp`); join it under rootfs by stripping the leading `/`.
-    rootfs.join(dest.strip_prefix("/").unwrap_or(dest))
-}
-
-fn mkdir_under(rootfs: &Path, dest: &Path) -> Result<()> {
-    let p = rooted(rootfs, dest);
-    std::fs::create_dir_all(&p).with_context(|| format!("mkdir {}", p.display()))
 }
 
 fn load_spec(path: &Path) -> Result<Spec> {

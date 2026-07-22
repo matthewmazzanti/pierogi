@@ -1,9 +1,10 @@
 //! libcrun backend: hand the spec to `csrc/shim.c` as an in-memory JSON string.
 //!
 //! No `config.json` on disk — `libcrun_container_load_from_memory` parses the
-//! JSON directly. `root.path` in the spec stays relative (`"rootfs"`); libcrun
-//! resolves it against `bundle`, which we pass as the context bundle. The shim's
-//! `libcrun_container_run` blocks (detach=false) and returns the exit code.
+//! JSON directly. `root.path` is the **absolute** `root` store path (set by
+//! `oci::build_spec`), so it's cwd-independent and needs no rewrite here — the
+//! historical `bundle/rootfs` override is gone. The shim's `libcrun_container_
+//! run` blocks (detach=false) and returns the exit code.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -33,15 +34,9 @@ pub fn run(
     state: &Path,
     console_socket: Option<&Path>,
 ) -> Result<i32> {
-    // youki resolves `root.path` against the bundle dir; libcrun resolves it
-    // against the *cwd* (the transparent `bundle` context field is not a
-    // chdir). Give crun an absolute rootfs so it doesn't depend on cwd.
-    let mut spec = spec.clone();
-    let mut root = spec.root().clone().context("spec has no root")?;
-    root.set_path(bundle.join("rootfs"));
-    spec.set_root(Some(root));
-
-    let json = serde_json::to_string(&spec).context("serializing spec to JSON")?;
+    // `root.path` is already the absolute `root` store path (set in
+    // `oci::build_spec`), so it doesn't depend on cwd — no rewrite needed.
+    let json = serde_json::to_string(spec).context("serializing spec to JSON")?;
 
     let c_json = CString::new(json).context("spec JSON had an interior NUL")?;
     let c_state = CString::new(state.to_string_lossy().as_bytes())?;
