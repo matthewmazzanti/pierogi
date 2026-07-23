@@ -8,15 +8,6 @@ license = "MIT"
 name = "pierogi"
 path = "src/main.rs"
 
-[features]
-# crun is the default backend, so its libcrun FFI shim (csrc/shim.c) compiles by
-# default — every build path (cargo, devShell, the flake `pierogi` package) uses
-# crun. This needs a C toolchain + the harvested libcrun dev tree at $CRUN_DEV,
-# both of which `nix develop` / the flake provide. To build youki-only without
-# that toolchain, opt out with `cargo build --no-default-features`.
-default = ["crun"]
-crun = []
-
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -26,16 +17,14 @@ libc = "0.2"
 # parsing out of hand-rolled unsafe. (libc stays for the winsize ioctl and the
 # async-signal-safe write in the SIGWINCH handler.)
 nix = { version = "0.31", features = ["socket", "uio", "poll", "term", "signal", "fs", "event"] }
-# youki, driven in-process. oci-spec is pinned to the major libcontainer 0.6
-# depends on (^0.9) so the spec types are shared, not two incompatible copies.
-libcontainer = "0.6"
+# The OCI runtime spec types we build in `oci.rs` and serialize to the JSON
+# string libcrun's `load_from_memory` takes.
 oci-spec = { version = "0.9", features = ["runtime"] }
 # the typed pierogi Spec schema (serde derive) + JSON (also feeds libcrun's
-# load_from_memory on the crun backend).
+# load_from_memory).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
-# compiles csrc/shim.c when the `crun` feature is enabled.
+# compiles the libcrun FFI shim (csrc/shim.c).
 cc = "1"

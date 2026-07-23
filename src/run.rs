@@ -16,13 +16,12 @@ use anyhow::{Context, Result};
 use crate::oci::{build_spec, RealizeInputs};
 use crate::overrides::Overrides;
 use crate::resolve::{resolve, resolve_from_graph};
-use crate::runtime::Backend;
 use crate::spec::Spec;
 use crate::tty::ConsoleRelay;
 
 /// `pierogi run [overrides] <spec.json>` — load a spec, overlay any CLI
-/// overrides, resolve, and launch.
-pub fn run_spec(spec_path: PathBuf, backend: Backend, overrides: Overrides) -> Result<()> {
+/// overrides, and launch.
+pub fn run_spec(spec_path: PathBuf, overrides: Overrides) -> Result<()> {
     let mut spec = load_spec(&spec_path)?;
     // Overlay CLI overrides (env / hostname / argv / host-tmpfs mounts). None of
     // these touch the closure — it's sealed at build time — so they layer on
@@ -31,7 +30,7 @@ pub fn run_spec(spec_path: PathBuf, backend: Backend, overrides: Overrides) -> R
         eprintln!("pierogi: applying CLI overrides to {}", spec_path.display());
         overrides.apply(&mut spec);
     }
-    launch(spec, backend)
+    launch(spec)
 }
 
 /// `pierogi resolve <spec> --graph <reference-graph>` — build a spec: traverse
@@ -48,8 +47,8 @@ pub fn resolve_cmd(spec_path: PathBuf, graph_file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// The mode-agnostic tail: assert built → realize → drive a backend → clean up.
-fn launch(spec: Spec, backend: Backend) -> Result<()> {
+/// The mode-agnostic tail: assert built → realize → drive crun → clean up.
+fn launch(spec: Spec) -> Result<()> {
     // Assert the spec is pre-baked (carries `closure:`). There is no runtime
     // query. The exec target is resolved by the runtime against the container's
     // PATH at launch (in-sandbox), not here.
@@ -65,15 +64,16 @@ fn launch(spec: Spec, backend: Backend) -> Result<()> {
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
-    // Lay out a bundle for config.json + runtime state. There is no rootfs to
-    // scaffold: `root` *is* the rootfs (mounted at `/`), and every mountpoint
-    // the closure and spec mounts need is baked into it. See `oci::build_spec`.
+    // Nothing but the container state dir touches disk. crun takes the spec as
+    // an in-memory JSON string (no config.json), and `root` *is* the rootfs (an
+    // absolute store path mounted at `/`, everything baked in — see
+    // `oci::build_spec`), so there is no bundle to assemble. crun still wants a
+    // bundle *context* path, but with an absolute `root.path` its content is
+    // irrelevant — we point it at `work`.
     let id = format!("pierogi-{}", std::process::id());
     let work = runtime_dir().join(&id);
-    let bundle = work.join("bundle");
     let state = work.join("state");
     std::fs::create_dir_all(&state).with_context(|| format!("mkdir {}", state.display()))?;
-    std::fs::create_dir_all(&bundle).with_context(|| format!("mkdir {}", bundle.display()))?;
 
     let oci = build_spec(&RealizeInputs {
         spec: &spec,
@@ -91,9 +91,9 @@ fn launch(spec: Spec, backend: Backend) -> Result<()> {
     };
     let console = relay.as_ref().map(ConsoleRelay::socket_path);
 
-    // Drive the backend. youki serializes config.json to the bundle; crun loads
-    // the spec from memory. Both block until exit.
-    let result = backend.run(&oci, &id, &bundle, &state, console);
+    // Drive crun: it loads the spec from memory (no config.json) and blocks
+    // until the container exits.
+    let result = crate::runtime::run(&oci, &id, &work, &state, console);
 
     // Restore the terminal (join the relay) before anything else prints.
     if let Some(relay) = relay {
@@ -113,14 +113,10 @@ fn load_spec(path: &Path) -> Result<Spec> {
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Where to lay out the bundle/state.
-///
-/// NOTE(spike finding): *not* `XDG_RUNTIME_DIR`. youki remounts the read-only
-/// root as a plain `MS_RDONLY|MS_REMOUNT|MS_BIND` without re-supplying the
-/// flags the kernel locks on a userns's mounts. `XDG_RUNTIME_DIR` is typically
-/// a `nosuid,nodev` tmpfs, so those locked flags make the RO-root remount fail
-/// with EPERM. A bundle on a filesystem without locked `nosuid`/`nodev` (e.g.
-/// `/tmp` here) lets the remount succeed.
+/// Where to lay out crun's state dir. Just needs to exist and be writable — the
+/// rootfs is a `/nix/store` path (not under here), and crun re-supplies the
+/// locked mount flags on the RO-root remount, so unlike the youki-era bundle
+/// this has no `nosuid`/`nodev` constraint. `$TMPDIR` is a fine default.
 fn runtime_dir() -> PathBuf {
     std::env::temp_dir()
 }

@@ -1,8 +1,8 @@
-//! Compile the libcrun FFI shim and link libcrun — only under the `crun`
-//! feature, so the default (youki-only) build needs no C toolchain or CRUN_DEV.
+//! Compile the libcrun FFI shim and link libcrun. crun is the only backend, so
+//! this always runs — the build needs a C toolchain and the harvested libcrun
+//! dev tree at $CRUN_DEV (both provided by `nix develop` / the flake).
 //!
-//! The harvested crun dev tree lives at $CRUN_DEV (exported by the flake's
-//! devShell). We need two include roots from it:
+//! We need two include roots from $CRUN_DEV:
 //!   - include/crun     for <crun/container.h>, <config.h>
 //!   - include          for <ocispec/...> that container.h pulls in
 //! yajl's headers (container.h does `#include <yajl/yajl_tree.h>`) arrive via
@@ -13,20 +13,17 @@
 //! (seccomp/cap/criu/systemd/yajl + folded-in libocispec) via DT_NEEDED+RUNPATH.
 
 fn main() {
-    #[cfg(feature = "crun")]
-    {
-        let crun_dev = std::env::var("CRUN_DEV")
-            .expect("CRUN_DEV not set — build the `crun` feature inside `nix develop`");
+    let crun_dev = std::env::var("CRUN_DEV")
+        .expect("CRUN_DEV not set — build inside `nix develop` (needs the libcrun dev tree)");
 
-        cc::Build::new()
-            .file("csrc/shim.c")
-            .include(format!("{crun_dev}/include/crun"))
-            .include(format!("{crun_dev}/include"))
-            .compile("pierogi_crun_shim");
+    cc::Build::new()
+        .file("csrc/shim.c")
+        .include(format!("{crun_dev}/include/crun"))
+        .include(format!("{crun_dev}/include"))
+        .compile("pierogi_crun_shim");
 
-        println!("cargo:rustc-link-search=native={crun_dev}/lib");
-        println!("cargo:rustc-link-lib=crun");
-        println!("cargo:rerun-if-changed=csrc/shim.c");
-        println!("cargo:rerun-if-env-changed=CRUN_DEV");
-    }
+    println!("cargo:rustc-link-search=native={crun_dev}/lib");
+    println!("cargo:rustc-link-lib=crun");
+    println!("cargo:rerun-if-changed=csrc/shim.c");
+    println!("cargo:rerun-if-env-changed=CRUN_DEV");
 }

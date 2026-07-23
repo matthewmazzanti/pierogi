@@ -84,8 +84,9 @@
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.pkg-config ];
-            buildInputs = [ pkgs.libseccomp crunDev ];
-            LIBSECCOMP_LIB_PATH = "${pkgs.libseccomp.lib}/lib";
+            # Only crunDev now — libseccomp was for youki's libseccomp-rs; crun
+            # links libseccomp itself via crunDev's propagated RUNPATH.
+            buildInputs = [ crunDev ];
             CRUN_DEV = "${crunDev}";
             # tests hit nix-store / namespaces — not build-sandbox friendly.
             doCheck = false;
@@ -120,14 +121,13 @@
             ];
 
             buildInputs = with pkgs; [
-              # youki path
-              libseccomp
+              # nix CLI for building/inspecting sandboxes (nix build .#bash-sandbox,
+              # bench.sh) — not the runtime, which no longer queries the store.
               nix
               # crun/libcrun: brings libcrun + its link chain via propagation
               crunDev
             ];
 
-            LIBSECCOMP_LIB_PATH = "${pkgs.libseccomp.lib}/lib";
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             # so the smoke test / build.rs can find the harvested dev tree
             CRUN_DEV = "${crunDev}";

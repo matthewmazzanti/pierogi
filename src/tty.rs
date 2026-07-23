@@ -1,8 +1,7 @@
 //! Host-side terminal relay for `exec.terminal = true` sandboxes.
 //!
-//! We drive the OCI **console-socket** protocol ourselves so one implementation
-//! serves both backends — crun and youki each take a console-socket *path*,
-//! nothing more. The flow:
+//! We drive the OCI **console-socket** protocol ourselves — crun takes a
+//! console-socket *path*, nothing more. The flow:
 //!
 //!   1. bind an `AF_UNIX` socket and hand its path to the runtime;
 //!   2. the runtime, *inside* the container (where it opens the pty and makes

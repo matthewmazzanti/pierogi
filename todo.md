@@ -9,13 +9,19 @@ rootfs mounted at `/` (baked `/etc`, `/bin`, and all mountpoints); no launch-tim
 scaffold; `--mount store:` dropped; closure frozen at build time. See
 `docs/spec.md#sealed-rootfs`.
 
-- [ ] **youki: RO-root remount EPERMs on the store-path rootfs.** With the rootfs
-  now a `/nix/store` path, youki's bare `MS_REMOUNT|MS_RDONLY|MS_BIND` hits the
-  store's locked `nosuid`/`nodev` flags (the exact M0 finding, previously dodged
-  by putting the bundle on `/tmp`). crun handles it (re-supplies flags). Options:
-  re-supply the locked flags on youki's remount (upstream-shaped), bind the store
-  path into a `/tmp` bundle first (re-adds one bind), or accept crun-only for
-  sealed rootfs. **crun is the default, so not blocking.**
+- [x] **Dropped youki; crun is the only backend.** youki couldn't RO-remount a
+  `/nix/store` rootfs (bare `MS_REMOUNT|MS_RDONLY` vs the store's locked
+  `nosuid`/`nodev`); crun re-supplies the flags. Removed `youki.rs`, the `Backend`
+  enum + `--runtime` flag, the `crun` feature gate (crun always compiled), and the
+  `libcontainer`/`tracing-subscriber`/`libseccomp` deps. The spec now reaches crun
+  purely as an in-memory JSON string — no `config.json`, and the on-disk *bundle*
+  is gone too (crun's bundle context points at the work dir; only its state dir
+  touches disk). `nix build .#pierogi` + `.#bash-sandbox` verified.
+- [ ] **README + `docs/*.md` still describe youki as *the* runtime.** README's
+  "M0 spike" front-matter ("embed the youki `libcontainer` runtime", "drives youki
+  in-process", the youki-specific findings) and mentions in `docs/architecture.md`
+  / `roadmap.md` / `startup-performance.md` / `vision.md` predate the crun-only,
+  sealed-rootfs world. Fold into the doc sweep below.
 - [x] **Removed `Mount::Store` + the live query.** Dropped the `Store` variant
   (a bare store mount was a closure seed in disguise; relocation → a `Host`
   bind), and the whole `nix-store --query` path (`closure_of`, `PIEROGI_CLOSURE`,

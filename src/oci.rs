@@ -74,9 +74,9 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
         .gid_mappings(vec![gid_map])
         .build()?;
 
-    // Engine-essential mounts (runtime surface, not yet spec fields): youki
-    // populates /dev's device nodes itself (default_devices + bind in rootless
-    // mode), so we only mount the /dev tmpfs and let it.
+    // Engine-essential mounts (runtime surface, not yet spec fields): crun
+    // populates /dev's device nodes itself (its default devices, bound in
+    // rootless mode), so we only mount the /dev tmpfs and let it.
     let mut mounts = base_mounts()?;
 
     // A controlling terminal needs a devpts instance in the container's /dev so
@@ -146,9 +146,9 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
         .build()?;
 
     // OCI root.path is the `root` store path itself — an absolute path, mounted
-    // at `/` and remounted read-only. Absolute so it's bundle/cwd-independent on
-    // both backends (youki joins it against the bundle, which for an absolute
-    // path yields the path unchanged; crun no longer rewrites it).
+    // at `/` and remounted read-only. Absolute so it's independent of crun's
+    // bundle/cwd (crun resolves a relative root.path against the bundle; an
+    // absolute one is taken as-is, no rewrite).
     let root = RootBuilder::default()
         .path(spec.root.as_path().to_path_buf())
         .readonly(true)
