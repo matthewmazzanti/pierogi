@@ -27,7 +27,6 @@
 //!   bundle under `$TMPDIR` instead. See `run::runtime_dir`.
 //! * **cgroups.** Worked via systemd user-session delegation (rootless).
 
-mod closure;
 mod oci;
 mod overrides;
 mod resolve;
@@ -50,8 +49,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run a sandbox from a spec: `pierogi run <spec.json>`. If the spec carries
-    /// a `closure:`, it launches with no Nix query.
+    /// Run a sandbox from a **pre-baked** spec: `pierogi run <spec.json>`. The
+    /// spec must carry its `closure:` — there is no runtime Nix query. Build one
+    /// first with `pierogi resolve … --closure` (or a Nix builder).
     ///
     /// CLI overrides overlay onto the loaded spec before it runs (the `run`
     /// bridge): env, hostname, argv, and additive host/tmpfs mounts — all
@@ -86,18 +86,17 @@ enum Cmd {
         argv: Vec<String>,
     },
 
-    /// Freeze a spec: fill `closure:` and print the resolved spec. With
-    /// `--closure` the closure is *supplied* (build-time, no query); without
-    /// it, a live `nix-store` query — the raw-spec resolve we keep for parity
-    /// against the build-time closure.
+    /// Build a spec: stamp the supplied `--closure` into `closure:` and print
+    /// the frozen spec. Supplied only — no live `nix-store` query (pierogi is
+    /// pre-bake). Driven by the Nix builder that emits the spec.
     Resolve {
         /// Path to a pierogi `spec.json`.
         spec: PathBuf,
 
         /// A file of store paths (one per line, `closureInfo` `store-paths`
-        /// shape) supplying the closure instead of a live `nix-store` query.
+        /// shape) supplying the closure. Required.
         #[arg(long)]
-        closure: Option<PathBuf>,
+        closure: PathBuf,
     },
 }
 

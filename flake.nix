@@ -90,17 +90,16 @@
             # tests hit nix-store / namespaces — not build-sandbox friendly.
             doCheck = false;
           };
-          # M1 tire-kicker: a static bash + coreutils sandbox with a hand-rolled
-          # /etc. Yields both the sealed resolved spec and the unresolved spec.
+          # M1 tire-kicker: a static bash + coreutils sandbox with a sealed
+          # rootfs (baked /etc + mountpoints). Yields the built spec.json.
           bashSandbox = import ./nix/bash-sandbox.nix { inherit pkgs pierogi; };
         in {
           crun-dev = crunDev;
           inherit pierogi;
-          # The self-contained sealed spec.json (closure stamped in, no query).
+          # The self-contained pre-baked spec.json (closure stamped in). This is
+          # the only runnable form — there is no live-query path to `run` an
+          # unbuilt spec against.
           bash-sandbox = bashSandbox.resolved;
-          # The sources-only spec — `pierogi run` it to resolve the closure live
-          # (nix-store query) for faster shell iteration.
-          bash-sandbox-unresolved = bashSandbox.unresolved;
         });
 
       devShells = forAll (system:

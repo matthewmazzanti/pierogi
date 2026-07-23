@@ -24,15 +24,15 @@ Start on the core (`exec`, `root`, `mounts`, `env`) and expand per feature.
 ```rust
 struct Spec {
     exec:    Exec,                      // what to run
-    root:    StorePath,                 // required base: closure seed + PATH base
-    mounts:  Vec<Mount>,                // additive binds
+    root:    StorePath,                 // the rootfs (mounted at /); PATH base; closure seed
+    mounts:  Vec<Mount>,                // additive placements onto root
     env:     BTreeMap<String, String>,  // producer-filled; PATH lives here
-    closure: Option<Resolved>,          // resolved bind set + input stamp; None => resolve() fills it
+    closure: Option<Closure>,           // built store view; None => unbuilt (run requires it)
 }
 
-struct Resolved {
-    from:  Vec<StorePath>,              // input stamp: the seeds (root + store-mount sources)
-    paths: Vec<StorePath>,              // the identity-bind set (may omit relocated seeds)
+struct Closure {
+    seeds:    Vec<StorePath>,           // provenance stamp: root + overlay-lower sources
+    resolved: Vec<StorePath>,           // the identity-bind set, sorted; excludes root (the / mount)
 }
 
 struct Exec {
@@ -42,30 +42,26 @@ struct Exec {
 
 #[serde(tag = "type", rename_all = "lowercase")]
 enum Mount {
-    // bind + FOLD closure; source must be a store path (enforced by the type).
-    // `dest` omitted -> identity bind at /nix/store/<source>; present -> relocate to `dest`.
-    Store { source: StorePath, dest: Option<PathBuf> },
-
-    // bind opaquely, NO fold; source may be anything, including /nix/store.
-    // ro by default; `rw` is the explicit opt-in to writability.
+    // bind opaquely; source may be anything, incl. /nix/store (a relocated store
+    // path — its deps are covered by `closure`, not this mount). ro unless `rw`.
     Host  { source: PathBuf, dest: PathBuf, #[serde(default)] rw: bool },
 
     // writable scratch; no source.
     Tmpfs { dest: PathBuf },
 
-    // writable view over a store path: FOLD the lower's closure (like Store),
-    // present a RW merge at `dest`. upper: None -> ephemeral tmpfs; Some(dir) -> persistent host dir.
+    // writable overlay over a store lower already in `closure`; RW merge at
+    // `dest`. upper: None -> ephemeral tmpfs; Some(dir) -> persistent host dir.
     Overlay { source: StorePath, dest: PathBuf, upper: Option<PathBuf> },
 }
 ```
 
 `#[serde(tag = "type", rename_all = "lowercase")]` gives an internally-tagged
-JSON form: a `"type"` discriminator plus that variant's fields, flat. Field names
-are uniform — `source → dest` everywhere (`dest` optional only for `Store`,
-absent for `Tmpfs`; `Overlay` adds a writable `upper`). The fold-vs-no-fold
-decision is **not** echoed in the field names (that would be redundant); it lives
-in the `type` tag and in the Rust type of `source` (`StorePath` folds, `PathBuf`
-is opaque). See [JSON serialization](#json-serialization) for the concrete shapes.
+JSON form: a `"type"` discriminator plus that variant's fields, flat. **Mounts
+are placements, not closure contributions** — nothing folds. The store view is
+the `closure` object alone; a mount only puts bytes at a `dest` the sealed `root`
+already baked. (This replaces the earlier fold-vs-no-fold `Store` model; see
+[Sealed rootfs](#sealed-rootfs-implemented-on-the-sealed-rootfs-branch).) See
+[JSON serialization](#json-serialization) for the concrete shapes.
 
 ### Fields
 
@@ -85,31 +81,26 @@ is opaque). See [JSON serialization](#json-serialization) for the concrete shape
 - **`env`** — producer-filled key/values. `PATH` lives here and is the single
   source of truth for `exec` lookup. The engine merges nothing; an absent `PATH`
   is just absent (the producer's responsibility). **`PATH` is an upper-layer
-  (bridge / producer) concern only** — mounts never auto-extend it. A store mount
-  folds the closure but contributes *nothing* to `PATH`; auto-pulling mount
-  `bin/` dirs onto `PATH` was considered and rejected as unhelpful (it couples
+  (bridge / producer) concern only** — mounts never auto-extend it. A mount
+  places bytes but contributes *nothing* to `PATH`; auto-pulling mount `bin/`
+  dirs onto `PATH` was considered and rejected as unhelpful (it couples
   filesystem exposure to executable resolution, which the producer should decide
   deliberately). If you mount a tool, you put its `bin/` on `PATH` yourself.
-- **`closure`** — the memoized resolution output, **`{ from, paths }`**.
-  **Present** ⇒ engine-ready, resolution already happened, no Nix query.
-  **Absent** ⇒ `resolve()` computes it. This is the production form of the
-  `PIEROGI_CLOSURE` bench stub in `src/closure.rs`; reuse its validation (all
-  under `/nix/store`, non-empty, fail loud).
-  - **`paths`** — the flat identity-bind set (what actually gets bound),
+- **`closure`** — the built store view, **`{ seeds, resolved }`**.
+  **Present** ⇒ engine-ready, pre-baked. **Absent** ⇒ unbuilt — and since there
+  is **no runtime query**, `run` fails loud; build it first with `resolve
+  --closure`. Supplied lists are validated (all under `/nix/store`, non-empty,
+  fail loud — `resolve::validate_closure`).
+  - **`resolved`** — the flat identity-bind set (what actually gets bound),
     **canonically sorted** (lexicographic by store path). Order is cosmetic to
-    the engine (it binds a set), but sorting makes a supplied (build-time) and a
-    live resolve of the same seeds *byte-identical*, so `closure == resolve(root)`
-    is plain equality rather than a set comparison, and the artifact is
-    reproducible regardless of closure source. May omit a relocated store-mount
-    source that nothing references (`from ⊋ paths`).
-  - **`from`** — the input stamp: the seeds this closure was resolved from (`root`
-    + store-mount sources). Since store paths are content hashes, `from` is a
-    complete, query-free fingerprint: `from == current seeds` is a set comparison,
-    not a `nix-store` query — cheap drift detection, and the query-free half of
-    the `closure == resolve(root)` provenance assertion. It's a **mechanism only**
-    — what a `from` ≠ declared-seeds divergence *means* (error / warn / allowed
-    seal-override) is the separate [sealed-vs-delta](execution-modes.md#open--deferred)
-    policy.
+    the engine (it binds a set), but sorting makes any two builds of the same
+    inputs *byte-identical*, so the artifact is reproducible regardless of closure
+    source. **Excludes `root`** — that's the `/` mount, not a `/nix/store` bind.
+  - **`seeds`** — the provenance stamp: the seed store paths this closure was
+    built from (`root` + overlay-lower sources). Since store paths are content
+    hashes it's a complete, query-free fingerprint, but nothing reads it at
+    runtime (the query is gone) — it's there to parity-check against a fresh build
+    out-of-band, not to drive a re-resolve.
 
 ## The `Mount` model
 
@@ -280,16 +271,21 @@ time**. Consequences that supersede parts of this doc:
   (not `root`), which breaks the circularity: deps are buildable before `root`.
   `PATH` points at `/bin` (`root`'s own `bin/`, surfaced at `/`), so nothing
   references `/nix/store/<root-hash>` and `root` needs no self-mountpoint.
+- **No runtime query — pre-bake only.** The live `nix-store --query` path is
+  gone entirely (`closure_of` and the `PIEROGI_CLOSURE` stub deleted). A spec's
+  `closure` is *always* supplied at build (`closureInfo` → `resolve --closure`);
+  `run` on an unbuilt spec **fails loud**. There is no `Mount::Store` type — a
+  bare store mount was a closure seed in disguise (folds are gone), and a
+  relocation is now just a `Host` bind whose deps live in `closure`.
 - **No runtime store additions.** A store path added at launch would need a
-  `/nix/store/<hash>` mountpoint the image never baked. So `--mount store:` is
-  gone (no seal-break / delta-recompute) and a different closure means a
-  different image. `--mount host:` / `tmpfs:` still work, but only onto dests the
-  image already baked.
-- **A present `closure` is authoritative.** `resolve()` uses it verbatim — no
-  query and no seed-drift check. With no runtime path that can change a sealed
-  spec's seeds, comparing declared seeds to `closure.from` every launch would
-  only catch a hand-edit-without-re-resolve, so it's dropped. `closure.from`
-  stays as provenance to parity-check against a fresh `resolve` out-of-band.
+  `/nix/store/<hash>` mountpoint the image never baked, so `--mount store:` is
+  gone and a different closure means a different image. `--mount host:` /
+  `tmpfs:` still work, but only onto dests the image already baked.
+- **A present `closure` is authoritative.** `resolve()` only asserts it's there —
+  no query, no seed-drift check. With no runtime path that can change a sealed
+  spec's seeds, comparing them every launch would only catch a
+  hand-edit-without-re-resolve, so it's dropped. `closure.seeds` stays as
+  provenance to parity-check against a fresh build out-of-band.
 - **File-vs-dir mountpoints move to build time.** A file store path (e.g. a
   `writeText` `/etc` file) needs a file mountpoint, a dir needs a dir — the root
   derivation stats each closure member and bakes the matching kind (what

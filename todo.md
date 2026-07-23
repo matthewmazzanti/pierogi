@@ -16,15 +16,22 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   re-supply the locked flags on youki's remount (upstream-shaped), bind the store
   path into a `/tmp` bundle first (re-adds one bind), or accept crun-only for
   sealed rootfs. **crun is the default, so not blocking.**
-- [ ] **Decide `Mount::Store`'s fate.** The type + its `resolve`/`oci` handling
-  still exist (spec-level relocations), but it's no longer CLI-constructable and
-  the bash-sandbox doesn't use it. Under a sealed rootfs a relocated store mount
-  still needs its `dest` baked. Keep as a build-time-only spec construct, or
-  remove? Also revisit `Overlay` (still deferred) under the frozen-topology model.
-- [ ] **Reconcile the rest of `docs/spec.md`.** The realization + root-as-mount
-  sections and the field note are updated; the `Mount` model, closure-fold, and
-  seal-break narrative (`execution-modes.md` too) still describe the old
-  dynamic-closure world. Sweep once the direction is committed.
+- [x] **Removed `Mount::Store` + the live query.** Dropped the `Store` variant
+  (a bare store mount was a closure seed in disguise; relocation → a `Host`
+  bind), and the whole `nix-store --query` path (`closure_of`, `PIEROGI_CLOSURE`,
+  `closure.rs`). `closure` split into `{ seeds, resolved }`; `run` requires a
+  pre-baked spec (fails loud otherwise); `resolve --closure` is the sole
+  closure-filling entry.
+- [ ] **`Overlay` under the frozen-topology model.** Still deferred (`oci` bails).
+  Its lower must be in `closure` and its `dest` baked; it's the last `Mount`
+  variant that names a store `source` (so the only `store_refs` contributor).
+  Revisit realization when it lands.
+- [ ] **Reconcile the rest of `docs/spec.md` + `execution-modes.md`.** The schema
+  block, `closure` field docs, realization, and the Sealed-rootfs section are
+  updated. **Still stale (describe the old dynamic-closure/fold world):** the
+  "Mount model" section (fold-vs-no-fold table, `Store` prose), "Resolution
+  invariant", the `closureInfo` table's `closure.paths` references, and all five
+  "Worked examples" (relocation/`from ⊋ paths`, seal-break). Needs a full sweep.
 - [x] **`/tmp` stays spec-declared.** DECIDED: writable `/tmp` is a spec `tmpfs`
   mount onto a baked `/tmp` dir, not an engine-essential base mount — the engine
   carries no policy. (`/proc`, `/dev` remain base mounts as runtime surface.)

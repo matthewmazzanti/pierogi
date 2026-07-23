@@ -1,17 +1,15 @@
 # M1 nix-mode artifact — the tire-kicking version, sealed-rootfs edition.
 #
-# Returns two spec.json store paths for a static bash + coreutils sandbox whose
-# `root` is a **complete, sealed rootfs**: `/etc`, a `/bin` symlink farm, and
-# every mountpoint the runtime needs (`/proc`, `/dev`, `/tmp`, and one
+# Returns the built spec.json for a static bash + coreutils sandbox whose `root`
+# is a **complete, sealed rootfs**: `/etc`, a `/bin` symlink farm, and every
+# mountpoint the runtime needs (`/proc`, `/dev`, `/tmp`, and one
 # `/nix/store/<hash>` per closure member) baked in. Nothing is scaffolded at
 # launch — `pierogi` mounts `root` at `/`, remounts it read-only, and binds the
 # closure onto the pre-baked mountpoints.
 #
-#   * `resolved`   — the **self-contained sealed** spec (closure stamped in, no
-#                    runtime query). The real nix-mode artifact.
-#   * `unresolved` — the sources-only spec (no `closure:`). For shell iteration:
-#                    `pierogi run` on it resolves the closure with a live
-#                    `nix-store --query --requisites` at run time.
+# There is no runtime query, so the only runnable artifact is the **built** spec
+# (`resolved`): closure stamped in at build. The sources-only spec exists only
+# as the internal input to `resolve --closure`, not as a runnable output.
 #
 # The pipeline it exercises:
 #
@@ -114,7 +112,8 @@ let
     done < ${closure}/store-paths
   '';
 
-  # The unresolved spec: sources only, no `closure:` (resolve stamps it).
+  # The sources spec: no `closure:` (resolve --closure stamps it). Internal
+  # input only — not runnable, since there is no live-query path.
   unresolvedSpec = {
     exec = {
       executable = "bash";
@@ -138,14 +137,11 @@ let
 
 in
 {
-  # The sources-only spec. Its `root` is a reference, so building this realizes
-  # the rootfs (and its closure) into the store — the live `nix-store` query at
-  # run time then has everything to resolve against.
-  unresolved = unresolvedSpecFile;
-
-  # Stamp: supplied closure, no query. $out is the resolved spec.json itself.
-  # The supplied closure omits `root` (it's the / mount, excluded from binds);
-  # `resolve` stamps `from = [root]`, `paths = <deps closure>`.
+  # Stamp: supplied closure, no query. $out is the built spec.json itself. The
+  # supplied closure omits `root` (it's the / mount, excluded from binds);
+  # `resolve` stamps `closure = { seeds = [root], resolved = <deps closure> }`.
+  # Building this also realizes the rootfs and its whole closure into the store,
+  # so every bind the spec names is present.
   resolved = pkgs.runCommand "pierogi-bash-sandbox.json" { } ''
     ${pierogi}/bin/pierogi resolve ${unresolvedSpecFile} \
       --closure ${closure}/store-paths > $out

@@ -2,10 +2,10 @@
 //! spec the backend drives (`docs/spec.md#realization`).
 //!
 //! Realization, field by field:
-//! * `closure.paths` → one read-only identity bind per path under `/nix/store`,
-//!   onto mountpoint dirs **pre-baked into `root`** (see below).
-//! * `mounts` → OCI mounts: `Store` (identity = already covered by the closure;
-//!   relocate = one bind at `dest`), `Host` (ro/rw bind), `Tmpfs`. `Overlay` is
+//! * `closure.resolved` → one read-only identity bind per path under
+//!   `/nix/store`, onto mountpoint dirs **pre-baked into `root`** (see below).
+//! * `mounts` → OCI placements: `Host` (ro/rw bind — a relocated store path is
+//!   just a host bind, its deps already in the closure), `Tmpfs`. `Overlay` is
 //!   deferred within M1.
 //! * `env` → `process.env`, verbatim. `exec` → `process.args` (resolved
 //!   absolute path as `argv[0]`).
@@ -92,11 +92,10 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
     // lower exists before it's referenced.
     //
     // `root` itself is skipped: it's the `/` mount (OCI root.path below), not a
-    // `/nix/store/<hash>` entry, and has no baked self-mountpoint. A live
-    // resolve leaves `root` in `closure.paths` (its query lists it); a supplied
-    // build-time closure seeds from root's *deps* and omits it. Skipping here
-    // makes both sources realize identically.
-    for path in &closure.paths {
+    // `/nix/store/<hash>` entry, and has no baked self-mountpoint. A supplied
+    // build-time closure seeds from root's *deps* and already omits it; this
+    // skip is a cheap guard against a hand-written `resolved` that included it.
+    for path in &closure.resolved {
         if path == &spec.root {
             continue;
         }
@@ -104,24 +103,10 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
         mounts.push(bind_mount(&p, &p, &["bind", "ro"])?);
     }
 
-    // Additive spec mounts.
+    // Additive placement mounts. A relocated store path is just a `Host` bind
+    // (its deps are covered by the closure above); there is no `Store` variant.
     for m in &spec.mounts {
         match m {
-            // Identity store mount: its closure (incl. itself) is already bound
-            // above — nothing to add.
-            Mount::Store { dest: None, .. } => {}
-            // Relocated store mount: deps stay identity-bound in the closure;
-            // bind the path itself at `dest`.
-            Mount::Store {
-                source,
-                dest: Some(dest),
-            } => {
-                mounts.push(bind_mount(
-                    &dest.to_string_lossy(),
-                    &source.to_string(),
-                    &["bind", "ro"],
-                )?);
-            }
             Mount::Host { source, dest, rw } => {
                 let opts: &[&str] = if *rw {
                     &["bind", "rw"]
@@ -138,7 +123,7 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
                 mounts.push(tmpfs_mount(dest)?);
             }
             Mount::Overlay { .. } => {
-                bail!("overlay mount realization is deferred within M1 (Store/Host/Tmpfs only)");
+                bail!("overlay mount realization is deferred within M1 (host / tmpfs only)");
             }
         }
     }

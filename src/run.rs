@@ -1,12 +1,13 @@
-//! Orchestrate a run: obtain a spec → resolve → realize → drive a backend.
+//! Orchestrate a run: obtain a spec → assert built → realize → drive a backend.
 //!
 //! Two entry points, both spec-in (no ad-hoc `wrap`/exe bridge — that path was
 //! rolled back once nix-mode build-time resolution became the way in):
-//! * [`run_spec`] — the `run` verb: load a `spec.json`, resolve (no query if it
-//!   already carries a `closure:`), launch.
-//! * [`resolve_cmd`] — the `resolve` verb: load, resolve (live query on a raw
-//!   spec, *or* a supplied `--closure`), print the resolved spec. The live path
-//!   is what lets us parity-check a build-time closure against a fresh resolve.
+//! * [`run_spec`] — the `run` verb: load a `spec.json`, apply CLI overrides,
+//!   launch. The spec must already carry its `closure:` (there is no runtime
+//!   query — pierogi is pre-bake only).
+//! * [`resolve_cmd`] — the `resolve` verb: load, stamp a **supplied**
+//!   `--closure` (build-time; `closureInfo`'s `store-paths`), print the built
+//!   spec. This is the sole path that fills a closure.
 
 use std::path::{Path, PathBuf};
 
@@ -23,9 +24,9 @@ use crate::tty::ConsoleRelay;
 /// overrides, resolve, and launch.
 pub fn run_spec(spec_path: PathBuf, backend: Backend, overrides: Overrides) -> Result<()> {
     let mut spec = load_spec(&spec_path)?;
-    // Overlay CLI overrides before resolve so the closure step sees them: an
-    // argv override resolves within the closure, and a store mount adds a seed
-    // (folded live, or breaking a sealed spec's seal — see `resolve`).
+    // Overlay CLI overrides (env / hostname / argv / host-tmpfs mounts). None of
+    // these touch the closure — it's sealed at build time — so they layer on
+    // without a query or a re-resolve.
     if !overrides.is_empty() {
         eprintln!("pierogi: applying CLI overrides to {}", spec_path.display());
         overrides.apply(&mut spec);
@@ -33,35 +34,30 @@ pub fn run_spec(spec_path: PathBuf, backend: Backend, overrides: Overrides) -> R
     launch(spec, backend)
 }
 
-/// `pierogi resolve <spec> [--closure <store-paths>]` — freeze a spec: fill
-/// `closure:` (live query, or the supplied build-time list) and print it.
-pub fn resolve_cmd(spec_path: PathBuf, closure_file: Option<PathBuf>) -> Result<()> {
+/// `pierogi resolve <spec> --closure <store-paths>` — build a spec: stamp the
+/// supplied closure (no query) and print it. The build-time freeze entry.
+pub fn resolve_cmd(spec_path: PathBuf, closure_file: PathBuf) -> Result<()> {
     let mut spec = load_spec(&spec_path)?;
-    match closure_file {
-        Some(file) => {
-            let supplied = read_store_paths(&file)?;
-            resolve_supplied(&mut spec, supplied)?;
-        }
-        None => resolve(&mut spec)?,
-    }
-    // Serialize the resolved spec to stdout (the frozen artifact).
-    let json = serde_json::to_string_pretty(&spec).context("serializing resolved spec")?;
+    let supplied = read_store_paths(&closure_file)?;
+    resolve_supplied(&mut spec, supplied)?;
+    // Serialize the built spec to stdout (the frozen artifact).
+    let json = serde_json::to_string_pretty(&spec).context("serializing built spec")?;
     println!("{json}");
     Ok(())
 }
 
-/// The mode-agnostic tail: resolve → realize → drive a backend → clean up.
-fn launch(mut spec: Spec, backend: Backend) -> Result<()> {
-    // Resolve: fill `closure:` (live query) or short-circuit if already sealed.
-    // The exec target is resolved by the runtime against the container's PATH at
-    // launch (in-sandbox), not here.
-    resolve(&mut spec)?;
+/// The mode-agnostic tail: assert built → realize → drive a backend → clean up.
+fn launch(spec: Spec, backend: Backend) -> Result<()> {
+    // Assert the spec is pre-baked (carries `closure:`). There is no runtime
+    // query. The exec target is resolved by the runtime against the container's
+    // PATH at launch (in-sandbox), not here.
+    resolve(&spec)?;
 
-    let closure = spec.closure.as_ref().expect("resolved above");
+    let closure = spec.closure.as_ref().expect("asserted above");
     eprintln!(
         "pierogi: sealed rootfs {} + {} closure binds",
         spec.root,
-        closure.paths.len()
+        closure.resolved.len()
     );
 
     let uid = unsafe { libc::getuid() };

@@ -68,9 +68,13 @@ impl<'de> Deserialize<'de> for StorePath {
 pub struct Spec {
     /// What to run.
     pub exec: Exec,
-    /// Required base: the closure seed and where `PATH` conventionally points.
+    /// The **rootfs**: a sealed store path mounted at `/` (remounted read-only)
+    /// carrying the whole skeleton — `/etc`, `/bin`, and every baked mountpoint.
+    /// Where `PATH` conventionally points, and the closure's provenance seed.
+    /// Excluded from the `/nix/store` binds (it's the `/` mount).
     pub root: StorePath,
-    /// Additive binds layered onto the root.
+    /// Additive placements layered onto `root` (host / tmpfs / overlay). Each
+    /// binds onto a mountpoint `root` already baked; none folds a closure.
     #[serde(default)]
     pub mounts: Vec<Mount>,
     /// Producer-filled key/values; `PATH` lives here and is the single source
@@ -80,10 +84,11 @@ pub struct Spec {
     /// The sandbox's UTS hostname (OCI `hostname`). Defaults to `pierogi`.
     #[serde(default = "default_hostname")]
     pub hostname: String,
-    /// The memoized resolution output. `Some` ⇒ engine-ready, no Nix query;
-    /// `None` ⇒ `resolve()` computes it.
+    /// The **built** store view — `{ seeds, resolved }`. `Some` ⇒ pre-baked and
+    /// engine-ready; `None` ⇒ unbuilt (there is no runtime query, so `run`
+    /// requires it — build with `resolve --closure`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub closure: Option<Resolved>,
+    pub closure: Option<Closure>,
 }
 
 /// The default UTS hostname when a spec omits one.
@@ -107,35 +112,31 @@ pub struct Exec {
     pub terminal: bool,
 }
 
-/// The resolved bind set plus its input stamp — the production form of the
-/// `PIEROGI_CLOSURE` bench stub.
+/// The built store view: where it was resolved *from* and what was locked *in*.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Resolved {
-    /// Input stamp: the seeds this closure was resolved from (`root` +
-    /// store-mount / overlay sources). A query-free drift fingerprint.
-    pub from: Vec<StorePath>,
-    /// The flat identity-bind set (what actually gets bound), **canonically
-    /// sorted** so a supplied (build-time) and a live resolve of the same seeds
-    /// are byte-identical. May omit a relocated store-mount source that nothing
-    /// references (`from ⊋ paths`).
-    pub paths: Vec<StorePath>,
+pub struct Closure {
+    /// Provenance stamp: the seed store paths this closure was built from
+    /// (`root` plus any overlay-lower sources). Not an input to anything at
+    /// runtime — the query is gone — but a fingerprint you can parity-check
+    /// against a fresh build out-of-band.
+    pub seeds: Vec<StorePath>,
+    /// The flat identity-bind set bound under `/nix/store`, **canonically
+    /// sorted** so any two builds of the same inputs are byte-identical.
+    /// Excludes `root` (the `/` mount, not a bind). Filled at build by `resolve
+    /// --closure`; `run` requires it.
+    pub resolved: Vec<StorePath>,
 }
 
-/// An additive mount. The variants are distinguished by **whether the closure
-/// folds**, not by where the source lives (see `docs/spec.md`).
+/// An additive **placement** layered onto `root`. Every variant just puts
+/// something at a `dest` the sealed `root` already baked — nothing folds a
+/// closure (the `closure` is the authoritative, build-locked store view; a
+/// runtime store addition would need an un-baked mountpoint). See `docs/spec.md`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Mount {
-    /// Bind + **fold** the source's closure; source must be a store path.
-    /// `dest` omitted → identity bind at `/nix/store/<source>`; present →
-    /// relocate to `dest`. Always read-only (the store is immutable).
-    Store {
-        source: StorePath,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        dest: Option<PathBuf>,
-    },
-    /// Bind opaquely, **no** fold; source may be anything, including
-    /// `/nix/store`. Read-only unless `rw`.
+    /// Bind opaquely; source may be anything, including `/nix/store` (e.g. a
+    /// relocated store path — its deps are covered by `closure`, not by this
+    /// mount). Read-only unless `rw`.
     Host {
         source: PathBuf,
         dest: PathBuf,
@@ -144,8 +145,8 @@ pub enum Mount {
     },
     /// Writable scratch; no source.
     Tmpfs { dest: PathBuf },
-    /// A `Store` mount, but writable: fold the lower's closure, present a
-    /// read-write merge at `dest`. `upper` omitted → ephemeral tmpfs;
+    /// A writable overlay over a store lower (already in `closure`), presenting
+    /// a read-write merge at `dest`. `upper` omitted → ephemeral tmpfs;
     /// `Some(dir)` → persistent host dir. (Realization deferred within M1.)
     Overlay {
         source: StorePath,
@@ -156,11 +157,12 @@ pub enum Mount {
 }
 
 impl Mount {
-    /// The store-path references this mount contributes as closure seeds:
-    /// `Store` and `Overlay` give their `source`; `Host`/`Tmpfs` give none.
+    /// The store-path source this mount references as a closure seed: only
+    /// `Overlay` (its lower); `Host`/`Tmpfs` contribute none. Used at build time
+    /// to stamp `closure.seeds`, not to drive any runtime query.
     pub fn store_refs(&self) -> Option<&StorePath> {
         match self {
-            Mount::Store { source, .. } | Mount::Overlay { source, .. } => Some(source),
+            Mount::Overlay { source, .. } => Some(source),
             Mount::Host { .. } | Mount::Tmpfs { .. } => None,
         }
     }
@@ -184,37 +186,41 @@ mod tests {
             "exec": { "executable": "bash", "args": ["-l"] },
             "root": "/nix/store/aaaa-base-env",
             "mounts": [
-                { "type": "store", "source": "/nix/store/bbbb-ripgrep-14.1.0" },
-                { "type": "store", "source": "/nix/store/cccc-myproject", "dest": "/home/dev/project" },
                 { "type": "host",  "source": "/etc/resolv.conf", "dest": "/etc/resolv.conf" },
                 { "type": "tmpfs", "dest": "/tmp" }
             ],
-            "env": { "PATH": "/nix/store/aaaa-base-env/bin" }
+            "env": { "PATH": "/bin" }
         }"#;
         let spec: Spec = serde_json::from_str(json).unwrap();
         assert!(spec.closure.is_none());
-        assert_eq!(spec.mounts.len(), 4);
+        assert_eq!(spec.mounts.len(), 2);
         // Defaults when omitted: no terminal, hostname `pierogi`.
         assert!(!spec.exec.terminal);
         assert_eq!(spec.hostname, "pierogi");
-        // seeds = root + the two store sources (host/tmpfs contribute none)
+        // host/tmpfs contribute no seeds.
         let seeds: Vec<_> = spec.mounts.iter().filter_map(Mount::store_refs).collect();
-        assert_eq!(seeds.len(), 2);
+        assert!(seeds.is_empty());
 
         // absent closure stays absent through a serialize round-trip
         let back = serde_json::to_string(&spec).unwrap();
         assert!(!back.contains("closure"));
         let again: Spec = serde_json::from_str(&back).unwrap();
-        assert_eq!(again.mounts.len(), 4);
+        assert_eq!(again.mounts.len(), 2);
     }
 
     #[test]
-    fn store_source_must_be_a_store_path() {
+    fn closure_round_trips_as_seeds_and_resolved() {
         let json = r#"{
             "exec": { "executable": "bash" },
             "root": "/nix/store/aaaa-base-env",
-            "mounts": [ { "type": "store", "source": "/etc/passwd" } ]
+            "closure": {
+                "seeds": [ "/nix/store/aaaa-base-env" ],
+                "resolved": [ "/nix/store/0000-bash", "/nix/store/1111-glibc" ]
+            }
         }"#;
-        assert!(serde_json::from_str::<Spec>(json).is_err());
+        let spec: Spec = serde_json::from_str(json).unwrap();
+        let c = spec.closure.as_ref().unwrap();
+        assert_eq!(c.seeds.len(), 1);
+        assert_eq!(c.resolved.len(), 2);
     }
 }
