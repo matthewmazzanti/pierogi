@@ -5,58 +5,66 @@ A fast, Nix-native sandbox runtime — between `bubblewrap` and `docker`. See
 [execution modes](docs/execution-modes.md), the [spec](docs/spec.md), and the
 [roadmap](docs/roadmap.md).
 
-## Status: M0 — shell-run spike ✅ working
+## What it does
 
-The **M0 spike** is proven: we embed the youki `libcontainer` OCI runtime
-*in-process* and drive it from Rust to namespace + `exec` a real shell, over a
-**read-only rootfs assembled from the target's Nix closure**. Verified:
-`uid=0 pid=1` (userns + pid ns), read-only root, writable `/tmp`,
-`/nix/store` containing exactly the 5-path bash closure, and no host
-`/etc`/`/home` visible. Deliberately crude otherwise — synthetic `/etc` and
-strict defaults are M4 (hardening; deferred behind nix-mode + the proxy/GPU work).
+pierogi runs a process in a rootless namespace sandbox whose root filesystem
+**is a sealed Nix store path**. A single `/nix/store/<hash>` is mounted at `/`
+(read-only) carrying the whole skeleton — `/etc`, `/bin`, and every mountpoint
+the sandbox needs — and the store paths it depends on are bind-mounted in under
+`/nix/store`. Nothing is assembled at launch: the rootfs and its exact closure
+are baked at **build time** by a Nix expression, so a launch is just namespaces
++ binds + `exec`, no Nix query (see [startup performance](docs/startup-performance.md)).
 
-### Build & run
+The runtime is **crun** (libcrun via the FFI shim in `csrc/shim.c`), driven
+in-process. The OCI spec is handed to it as an in-memory JSON string — no
+`config.json`, no on-disk bundle.
+
+## Build & run
 
 ```sh
-direnv allow        # or: nix develop
-cargo run -- run -- bash
+nix develop            # or: direnv allow  (.envrc is `use flake`)
+
+# Build a self-contained, pre-baked sandbox spec (a static bash + coreutils
+# rootfs with the closure stamped in), then run it:
+nix build .#bash-sandbox
+cargo run -- run ./result
 ```
 
-That:
+Inside, you get a shell whose filesystem is the sealed rootfs at `/` plus its
+closure under `/nix/store` and a writable tmpfs `/tmp`, `/dev`, and `/proc`.
+`PATH` is `/bin` (the rootfs's own symlink farm into the store).
 
-1. resolves `bash` to its `/nix/store` path and computes its closure,
-2. builds a read-only rootfs from that closure (one bind mount per store path),
-3. drives youki in-process to launch `bash` in user/mount/pid/uts/ipc
-   namespaces.
+### The two verbs
 
-Inside, you get a shell whose entire filesystem is bash's closure under
-`/nix/store` plus tmpfs `/tmp`, `/dev`, and `proc`. Only bash builtins and the
-bash binary are available (the closure has no coreutils) — that's expected; the
-point is *a namespaced shell launched from Rust*.
+- **`pierogi run <spec.json>`** — run a **pre-baked** spec. The spec must already
+  carry its `closure:` (there is no runtime Nix query); `run` on an unbuilt spec
+  fails loud. CLI overrides (`--env`, `--hostname`, `--mount host:…|tmpfs:…`, and
+  a trailing `-- cmd args`) overlay onto the loaded spec, but the closure is
+  frozen — there is no `--mount store:`.
+- **`pierogi resolve <spec.json> --graph <graph>`** — build a spec: traverse
+  Nix's `exportReferencesGraph` (supplied as JSON) from the spec's seeds, stamp
+  the resulting closure, and print the frozen spec. This is what a Nix builder
+  calls; see [`nix/bash-sandbox.nix`](nix/bash-sandbox.nix).
 
-### Findings surfaced by the spike
+### Findings still worth knowing
 
-- **config.json on disk.** youki's public API reads a bundle's `config.json`, so
-  we serialize the in-memory spec for now. The end goal is no on-disk spec;
-  confirming the in-memory path is the central open M0 question.
-- **read-only root needs the bundle off a `nosuid,nodev` mount.** youki remounts
-  `/` RO without re-supplying a userns's locked mount flags, so a bundle on
-  `XDG_RUNTIME_DIR` (a `nosuid,nodev` tmpfs) fails with EPERM. We lay the bundle
-  under `$TMPDIR` instead (`run::runtime_dir`).
-- **devices.** Let youki's `default_devices()` populate `/dev`; binding device
-  nodes via `mounts[]` yields EINVAL.
-- **cgroups.** Worked here via systemd user-session delegation; hosts without
-  delegation may need `systemd-run --user --scope`.
-- **libcontainer API churn.** If it stops compiling against the pinned crate,
-  check the executor/builder names in `crates/pierogi-engine/src/run.rs` (the
-  *shape* — `new → root path → as_init(bundle) → build → start → waitpid` — is
-  stable; names drift).
+- **In-memory spec.** `libcrun_container_load_from_memory` takes the spec as a
+  JSON string, so nothing touches disk but crun's own state dir. (youki, the
+  original second backend, was dropped — it couldn't RO-remount a `/nix/store`
+  rootfs; crun re-supplies the kernel-locked mount flags and handles it.)
+- **devices.** Don't bind device nodes via `mounts[]` (EINVAL). Mount a `/dev`
+  tmpfs and let crun populate its default device nodes.
+- **cgroups.** Work via systemd user-session delegation (rootless); hosts
+  without delegation may need `systemd-run --user --scope`.
 
 ## Layout
 
 ```
-crates/pierogi-engine/   # closure calc, spec build, runtime driving
-crates/pierogi-cli/      # `pierogi` binary (clap)
-docs/                    # vision / architecture / execution-modes / roadmap
-flake.nix .envrc         # dev shell: rust toolchain + libseccomp + nix
+src/            # the pierogi crate: resolve, spec, oci translation, run, tty relay
+src/runtime/    # crun backend (libcrun via the FFI shim)
+csrc/shim.c     # Rust <-> libcrun bridge
+build.rs        # compiles + links the shim
+nix/            # bash-sandbox.nix — the sealed-rootfs build pipeline
+flake.nix .envrc# dev shell: rust toolchain + the harvested libcrun dev tree
+docs/           # vision / architecture / execution-modes / spec / roadmap
 ```

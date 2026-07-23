@@ -1,24 +1,28 @@
 # Pierogi — Execution modes
 
-How an invocation becomes a running sandbox: the layers between `pierogi wrap
--- bash` and an `exec`, the verbs that tap them, and the one knob (`closure:`)
-that decides whether the expensive step runs at all. See [architecture.md](architecture.md)
-for the engine internals and [startup-performance.md](startup-performance.md)
-for why the closure query is the cost this design is built to dodge.
+How an invocation becomes a running sandbox: the layers between a spec and an
+`exec`, the verbs that tap them, and the invariant that a runnable spec already
+carries its `closure` — there is no launch-time Nix query. See
+[architecture.md](architecture.md) for the engine internals and
+[startup-performance.md](startup-performance.md) for why closure resolution is
+pushed to build time and never paid at launch.
 
 ## The pipeline
 
 Every invocation flows through the same four layers. Only the *first* differs
-by mode; everything from `resolve()` onward is mode-agnostic.
+by mode; everything from resolution onward is mode-agnostic. Resolution runs
+**ahead of the engine** — at build time in nix mode, or in `wrap`'s runtime bake
+— but never *inside* the `run` core, which only ever consumes an already-sealed
+spec.
 
 ```
-INPUT              BRIDGE (front-end)            RESOLVE                 SPEC          ENGINE
-─────              ──────────────────            ───────                 ────          ──────
-bare argv    ─┐                              ┌ closure_of() ─┐
-config file  ─┼─►  normalize → Config    ──► │  OR           │ ──► build_spec ──► backend.run
-store path   ─┘    (+ strict defaults,       └ short-circuit ┘     (spec.rs)
-                    identity, scan scope)        if closure:
-                    the "just works" layer      the "expensive" layer   mode-agnostic tail
+INPUT              BRIDGE (front-end)         RESOLVE (build time)      SPEC          ENGINE
+─────              ──────────────────         ────────────────────     ────          ──────
+bare argv    ─┐                            traverse the reference
+config file  ─┼─►  normalize → Config  ──► graph from the seeds  ──► build_spec ──► crun (libcrun)
+store path   ─┘    (+ strict defaults,     → stamp closure           (spec.rs)      load_from_memory
+                    identity, scan scope)   (src/resolve.rs)
+                    the "just works" layer  pre-baked, never at launch  mode-agnostic tail
 ```
 
 - **Bridge (front-end):** *input form → canonical `Config` + defaults.* Where the
@@ -26,16 +30,23 @@ store path   ─┘    (+ strict defaults,       └ short-circuit ┘     (spec
   no network, deny-all D-Bus), synthetic identity, scan-scope choice, and merging
   of layered input (a config file with CLI overrides on top). This is the layer
   the architecture doc gestures at as "the front-ends generate the spec."
-- **Resolve:** *`Config` → closure / rootfs.* The only layer that ever touches
-  Nix — and only when the `Config` carries no precomputed `closure:` to
-  short-circuit it. Today this is `closure_of()` → `nix-store --query
-  --requisites` (see `src/closure.rs`).
+- **Resolve:** *`Config` → closure.* Runs **ahead of the engine**, not inside the
+  `run` core. In nix mode it's a build step: it takes Nix's `exportReferencesGraph`
+  (the reference graph of the seeds, as JSON) and **traverses it from the spec's
+  seeds in-process** (`resolve_from_graph`, `src/resolve.rs`), stamping the
+  resulting `closure` in — no live `nix-store` query, the graph is supplied. In
+  `wrap` mode the equivalent bake happens at launch, in a scratch dir (see below).
+  Either way, a spec that reaches the engine without a built `closure` is a hard
+  error (fail loud), never a launch-time resolve *by `run`*.
 - **Spec / Engine:** `build_spec()` builds the in-memory OCI spec (`src/spec.rs`)
-  and the backend drives it (`src/runtime`). Identical for all modes.
+  and **crun** drives it — libcrun via the FFI shim, loading the spec from an
+  in-memory JSON string (`libcrun_container_load_from_memory`, no `config.json`),
+  `src/runtime/{mod,crun}.rs`. crun only — no runtime abstraction. Identical for
+  all modes.
 
 **Key invariant:** the security-critical core (resolve onward) never learns which
-mode it is in. Modes live entirely in the bridge plus the one resolve
-short-circuit — which is what keeps the core auditable.
+mode it is in. Modes live entirely in the bridge; the core only ever consumes a
+fully built spec — which is what keeps it auditable.
 
 ## The verbs
 
@@ -50,16 +61,16 @@ that build one first.
 
 | Verb | Input | Stops after | Emits / does |
 |---|---|---|---|
-| `wrap -- cmd` | exe / argv | engine | find exe → build its closure → run (spec **synthesized**) |
+| `wrap -- cmd` | exe / argv | engine | **bake a scratch rootfs** at runtime over the target's closure, resolve exe within it → run (spec **synthesized**; `wrap` unimplemented) |
 | `wrap <store-path> -- cmd` | store path | engine | fold the store path as `root`, `PATH` from its `bin/`, run cmd (spec **synthesized**) |
-| `wrap --dry-run …` | ad-hoc | bridge | prints the **unresolved** spec (sources, no `closure:`) |
-| `resolve <spec>` | spec | resolve() | prints the **resolved** spec (**+ `closure:`**) |
-| `run [overrides] <spec>` | spec | engine | runs the spec |
+| `wrap --dry-run …` | ad-hoc | bridge | prints the **unbuilt** spec (sources, no `closure`) |
+| `resolve <spec> --graph <ref-graph>` | spec + graph | resolve | prints the **built** spec (**+ `closure`**) |
+| `run [overrides] <spec>` | spec | engine | runs a **pre-baked** spec (fails loud if unbuilt) |
 
 **`pierogi wrap [flags] <input> -- <cmd>`** — the ad-hoc, zero-config "just
 works" surface, and the *only* place a store path or a bare exe is turned into a
-sandbox. Two ad-hoc inputs, one behavior: **an exe/argv** (find the exe, build
-its closure) or **a store path to fold** (an arbitrary package / buildEnv /
+sandbox. Two ad-hoc inputs, one behavior: **an exe/argv** (resolved *within* a
+baked base `root`) or **a store path to fold** (an arbitrary package / buildEnv /
 profile → `root`, `PATH` from its `bin/`). Either way it's not a separate engine
 path — the bridge **synthesizes a spec** from the input + strict defaults + the
 default base rootfs, then runs the normal tail. `wrap --dry-run` stops after the
@@ -77,123 +88,126 @@ and `resolve` consume a spec, and nothing synthesizes one yet.)
 > engine two unrelated ways — folded by `wrap` (ad-hoc), or as a spec file for
 > `run` (pre-baked) — and only the latter is a `run` mode.
 
-**`pierogi resolve <spec>`** — takes an existing pierogi spec and emits it
-**resolved: spec + `closure:`**. This is exactly the resolution step `run` runs
-internally (`closure_of()` → staple the result on), exposed standalone — the
-**pre-bake / freeze** operation that produces the sealed nix-mode artifact. The
-Nix builder shells it (sibling to `pierogi synth-etc`). Input is a spec, not
-argv, so it is a verb, not a flag.
+**`pierogi resolve <spec> --graph <ref-graph>`** — takes an existing pierogi
+spec plus a supplied `exportReferencesGraph`, traverses it from the spec's seeds,
+and emits the spec **built: spec + `closure`**. This is the **pre-bake / freeze**
+operation that produces the sealed nix-mode artifact — and the *only* place a
+closure is ever computed. `run` never does this; a spec that isn't built can't
+run. The Nix builder shells it (sibling to `pierogi synth-etc`), handing it the
+reference graph it already has for free. Input is a spec, not argv, so it is a
+verb, not a flag.
 
-**`pierogi run [overrides] <spec>`** — runs a spec. Branches on `closure:`
-presence: **absent** → dynamic config, resolved live at launch; **present** →
-pre-baked, sealed, run as-is. The distinction is invisible at the CLI — just "is
-this spec already resolved."
+**`pierogi run [overrides] <spec>`** — runs a **pre-baked** spec. The spec must
+already carry its `closure`; if it doesn't, `run` **fails loud** (pre-bake it
+with `resolve --graph` first). There is no resolve-at-launch branch — `run`
+consumes the built closure verbatim.
 
 Because each verb is one layer, they **compose**:
 
 ```
-pierogi wrap --dry-run -- bash     # argv → unresolved spec   (bridge)
+pierogi wrap --dry-run -- bash            # argv → unbuilt spec       (bridge)
   │  > sandbox.json ; edit
   ▼
-pierogi resolve sandbox.json       # spec → spec + closure     (resolve)
+pierogi resolve sandbox.json --graph refs.json   # spec + graph → + closure  (build)
   │  > sandbox.frozen.json
   ▼
-pierogi run sandbox.frozen.json    # spec → running process    (engine)
+pierogi run sandbox.frozen.json           # spec → running process    (engine)
 ```
 
-`pierogi wrap -- bash` is all three fused; `run <unresolved-spec>` is `resolve`
-then run internally.
+`pierogi wrap -- bash` fuses the bridge and engine, **baking a sealed rootfs at
+launch** (in a scratch dir, outside the store) and running it through the same
+machinery; `run` only ever consumes an already-built spec, and `resolve --graph`
+is the only verb that builds one.
 
 ## Config vs Spec: one schema, three provenances
 
 There is a **`Config`** (declarative sources) distinct from the **`Spec`**
-(resolved). The same schema appears at three points along resolution — these
+(built — closure stamped in). The same schema appears at three points — these
 three **provenances** are one `Config` at different stages, not three schemas
-(and the store-path column is a pre-baked *spec* file in the store, i.e. `run`,
-not the ad-hoc store-path fold that belongs to `wrap`):
+(and the store-path column is a pre-baked *spec* file that merely *lives* in the
+store, i.e. `run`, not the ad-hoc store-path fold that belongs to `wrap`):
 
 | | `pierogi wrap` | `pierogi run <config>` | `pierogi run <store-path spec>` |
 |---|---|---|---|
-| Provenance | **synthesized** from argv+defaults | **authored** by hand | **frozen** (resolve output stapled on) |
-| `root` | injected base | declared | declared (kept for audit) |
-| `closure:` key | absent | absent | **present** |
-| Resolution | live query over declared seeds | live query over declared seeds | **short-circuit — no query** |
-| Reproducible? | no (tracks host store) | contents declared, resolved live | **fully sealed** |
-| Speed | pays the query | pays the query | **fast-path, no query** |
+| Provenance | **synthesized** from argv+defaults | **authored** by hand | **build-baked** (`resolve --graph` output) |
+| `root` | injected base | declared | declared (identity-bound; kept for audit) |
+| `closure` key | inherited from baked base | **absent** | **present** |
+| Built when | ahead of time (baked base) | must be built before it runs | at Nix build time |
+| Reproducible? | tracks the baked base | not until built | **fully sealed** |
+| Runnable as-is? | yes (base pre-resolved) | **no — `run` fails loud** | **yes — closure verbatim** |
 | Position | ◄ just works | ── middle ── | works consistently ► |
 
-The three modes are ergonomic **bundles** of two underlying axes — *provenance*
-× *resolution time* (live/sealed) — not walls. Off-menu combinations are legal:
-an **authored config carrying a `closure:` key** is a "sealed dynamic config" —
-hand-frozen reproducibility with no Nix involved.
+Provenance is the only axis that varies — **resolution is always build-time**.
+There is no launch-time-resolve mode to trade against. An authored `Config`
+becomes runnable exactly when it has been through `resolve --graph`; a
+hand-authored spec carrying a stamped `closure` is indistinguishable from a
+Nix-baked one at the engine.
 
-`pre-baked = dynamic config, frozen`: the Nix builder serializes a resolved
-config with `closure:` stapled on. `run <unresolved-spec>` and the build path
-share the **stamping/serialization** codepath — *not* the query: a build sandbox
-has no daemon socket or Nix DB, so `nix-store --query --requisites` cannot run in
-it. Instead the closure is **supplied** by Nix (`closureInfo` / the reference
-graph — see [Nix-mode closure source](spec.md#nix-mode-closure-source-build-time)),
-and `resolve` there is pure data-shuffling. The `nix-store` query is one
-*pluggable source* of the closure (live wrap on a real host); `closureInfo`
-output and the `PIEROGI_CLOSURE` stub are the others.
+Every runnable spec is built the same way: `resolve` traverses a **supplied**
+`exportReferencesGraph` from the seeds and stamps the closure in. This works in a
+build sandbox precisely because it needs no daemon — there is no `nix-store`
+query, live or otherwise. Nix hands the builder the reference graph for free (via
+`exportReferencesGraph` under `__structuredAttrs`, in `$NIX_ATTRS_JSON_FILE`), so
+`resolve` there is pure graph traversal + serialization. That single graph-in /
+closure-out path is the *only* way a closure is produced.
 
 ## Resolution rules
 
-Today `src/run.rs` fuses "what to exec" and "what the rootfs is" into
-`argv[0] → closure → rootfs`. The core of this design is **splitting them**: the
-closure comes from **declared sources only** (`root` + store mounts); the exec
-target is *resolved against* that closure, never a source for it. There is no
-exe-derived closure — `argv[0]` is looked up, not scanned.
+The core of this design **splits "what to exec" from "what the rootfs is"**: the
+closure comes from **declared sources only**, and the exec target is *resolved
+against* that closure, never a source for it. There is no exe-derived closure —
+`argv[0]` is looked up in the container's `PATH`, not scanned.
 
-The closure has exactly two seeds, both declared:
+The closure's seeds are declared, and there are two kinds:
 
-1. **`root`** (required) → the base closure seed: `closure(root)`, with PATH from
-   its bin dirs. `argv[0]` is resolved **within** the closure and is an **error if
-   absent** — exec never expands the closure (Docker semantics; maximally
+1. **`root`** (required) → the rootfs *and* base closure seed, with `PATH` from
+   its `bin` dirs. `argv[0]` is resolved **within** the closure and is an **error
+   if absent** — exec never expands the closure (Docker semantics; maximally
    auditable). This holds in *every* mode; there is no exe-derived fallback and no
    `root: absent` case.
-2. **store mounts** → additive seeds, each dragging its own closure, unioned onto
-   root's. The full mount taxonomy by closure cost:
+2. **overlay lowers** → each overlay mount's store-path source is an additive
+   seed, dragging its own closure onto root's. `store_refs()` matches **only
+   `Overlay`**. The full mount taxonomy by closure contribution:
 
-| Mount kind | Has closure? | Query? |
-|---|---|---|
-| host bind | no (not a store path) | never — ro-default, narrow |
-| tmpfs / state | no | never — writable scratch |
-| store-path, declared at build | yes | no — folded into the resolved set |
-| store-path, added at runtime | yes | **yes — the only query trigger** |
+| Mount kind | Contributes a seed? |
+|---|---|
+| `Host` bind | no — not a store path (ro-default, narrow) |
+| `Tmpfs` | no — writable scratch |
+| `Overlay` (store-path lower) | yes — its source is a seed |
 
-`closure = closure_of(root) ∪ ⋃ closure_of(store mount)` — nothing is inferred
-from the command line (see [Declared-only closure](#declared-only-closure-no-discovery)).
+`seeds = root ∪ ⋃ overlay-lower sources`; `resolved` is the full closure of those
+seeds over the supplied graph, **including `root`**, canonically sorted. Nothing
+is inferred from the command line (see [Declared-only closure](#declared-only-closure-no-discovery)).
 
-## `closure:` — memoized resolution
+## `closure` — the built store view
 
-`closure:` is not a new source; it is the **cached output** of resolving the
-static sources. Its presence means "resolution already happened — do not re-run
-`closure_of()`." This is the production form of the `PIEROGI_CLOSURE` bench stub
-in `src/closure.rs`. `closure_of()` is a **pluggable source**: a live `nix-store
---query --requisites` (wrap, on a real host) *or* a supplied list. A Nix build
-takes the supplied path — it knows the closure for free (`closureInfo` / the
-reference graph) and could not query anyway (no daemon in the sandbox), so baking
-it into the emitted `Config` is just not discarding that information. Reuse the
-stub's validation (all under `/nix/store`, non-empty, fail loud) so a malformed
-`closure:` aborts rather than silently falling back to a query.
+`closure` is not a new source; it is the **stamped output** of resolving the
+declared seeds — `{ seeds, resolved }`. `seeds` is the provenance (`root` +
+overlay lowers); `resolved` is the full closure of those seeds over the supplied
+reference graph, **including `root`**, canonically sorted. Its presence means the
+spec is **built and runnable**; its absence means `run` **fails loud** (there is
+no launch-time query to fall back on). It is produced exactly once, by `resolve
+--graph` traversing `exportReferencesGraph` in-process (`resolve_from_graph`,
+`src/resolve.rs`); the engine consumes `resolved` verbatim.
 
-When both `root` and `closure:` are present, `closure:` drives execution and
-`root` is verifiable provenance — a test can assert `closure == resolve(root)`.
+`root` appears in both places: as a member of `closure.resolved` (identity-bound
+so absolute references into it resolve) and as the OCI `root.path` mounted at
+`/`. Both name the same sealed store path — `root` is verifiable provenance
+against `resolved`, and the two are stamped together at build, never re-derived.
 
-**Representation is swappable.** `closure:` as a flat list (per-path binds — the
-current engine, one `mount` syscall per path, carried *in* the spec) and a
-`rootfs -> <merged tree>` symlink are two serializations of the same "resolution
-done statically" idea. Both set the no-query flag; the choice between them is the
+**Representation is swappable.** The engine realizes `resolved` as **per-path
+binds** — one read-only identity bind per store path, onto mountpoint dirs baked
+into `root` (`src/oci.rs`). A `rootfs -> <merged tree>` symlink is an alternative
+serialization of the same "resolution done statically" idea; the choice is the
 mount-count lever (see startup-performance.md, lever 6) and lives entirely behind
 the spec's rootfs-representation seam. **Per-path binds for now** — so the
-nix-mode artifact is just the resolved spec (no separate `rootfs` entry); a
+nix-mode artifact is just the built spec (no separate `rootfs` entry); a
 merged-tree `rootfs` only appears if/when lever 6 lands.
 
 ## Declared-only closure (no discovery)
 
-The closure is **exactly what's declared** — `root` + store mounts (+ `closure:`
-if present). Nothing is inferred from `argv`, program arguments, or mount
+The closure's seeds are **exactly what's declared** — `root` + overlay lowers.
+Nothing is inferred from `argv`, program arguments, or mount
 *values*. This is the whole "everything the sandbox sees is written down" property:
 the visible store is a function of the spec, not of what a command happened to
 mention.
@@ -207,49 +221,50 @@ have), it can't be complete anyway (a `dlopen`ed store path never on the command
 line is missed), and it reintroduces the command-line inference the argv[0]-drop
 removed. Parked — revisit only if declared-only proves too rigid in practice.
 
-## `wrap`'s default base rootfs — baked, with a live opt-in
+## `wrap`'s rootfs — baked live, outside the store
 
-`wrap` ships a small default base env so `wrap -- bash` yields a usable shell
-(coreutils, etc.), not just bash's bare closure.
+`wrap` bakes its sealed rootfs **at runtime**, in a scratch dir outside the store,
+then runs it through the same machinery as a Nix-built root. The difference from
+nix mode is only *where and when* the rootfs is assembled — the scaffolding a Nix
+build does at build time (`/etc`, `/bin`, the mountpoints), `wrap` does at launch
+in `$TMPDIR` — not how it's run. This is the one place a closure is assembled at
+launch; the `run` core stays query-free.
 
-- **Baked default:** the base is pinned as a **runtime dependency of the pierogi
-  binary** — its closure is sealed, present by construction (offline,
-  reproducible), and known at build. Because bash resolves *within* that sealed
-  base (rule 1, Docker-within-root), `wrap -- bash` pays **no query** for the
-  common case; you pay a marginal delta only when wrapping something *outside* the
-  base. This turns the "just works" verb into a fast path.
-- **`--base <profile|pkgs>` live opt-in:** bootstrap a base at launch when you
-  want to track current nixpkgs, at the cost of a query and needing Nix at
-  runtime. The sealed-default / explicit-live split, applied to the base rootfs.
+- **Default base:** `wrap` ships a small base env (coreutils, etc.) pinned as a
+  **runtime dependency of the pierogi binary**, so for the common `wrap -- bash`
+  its closure is already present on the host store (offline, reproducible) — no
+  closure computation, just the runtime scaffolding of the scratch tree.
+- **`--base <profile|pkgs>` opt-in:** point `wrap` at a different, pre-built base.
 
-Caveat: baked assumes pierogi was Nix-installed (its runtime closure carries the
-base); `--base` needs Nix available at launch.
+Caveat: the pinned default assumes pierogi was Nix-installed (its runtime closure
+carries the base); `--base` needs the alternate base built before launch. Whether
+an arbitrary target's closure is computed live (a runtime query) or must be
+pre-built is the open design point — `wrap` is unimplemented (M4).
 
-## `run` overrides — rewrites, and when they recompute
+## `run` overrides — rewrites only
 
 Overrides on `run` are the bridge overlaying CLI input onto the loaded spec. The
-rule follows from the mount taxonomy: **only closure-touching overrides
-recompute; runtime-only overrides just rewrite.**
+closure is **sealed at build time**, so every override is **runtime-only — a
+rewrite, never a recompute.**
 
-| Override | Closure cost? | Effect |
-|---|---|---|
-| `--env`, `--hostname`, `--net`, `--cwd` | none | rewrite spec field |
-| `--exec` / argv | none | rewrite exec — **within** the closure (Docker-within-root), else **error** |
-| `--mount host:/x`, tmpfs, state | none | layer on |
-| `--mount store:/…` | **yes** | **delta recompute** over the existing set |
+| Override | Effect |
+|---|---|
+| `--env`, `--hostname` | rewrite spec field |
+| argv (trailing `-- cmd args`) | rewrite exec — resolved **within** the closure (Docker-within-root), else **error** |
+| `--mount host:SRC:DEST`, `--mount tmpfs:DEST` | layer on — dest must be a baked mountpoint in the sealed `root` |
 
-Seal interaction: when `<spec>` is pre-baked (`closure:`) and an override adds a
-store path, that is the exact — and only — point where the seal breaks, gated by
-an explicit override. `run` overrides are where the deferred sealed/delta policy
-will eventually be answered.
+There is **no `--mount store:`** and no closure recompute: a different closure
+means a different image, built with `resolve --graph`. Relocating a store path is
+a plain `Host` bind whose dependencies are already covered by the built
+`closure`, so the seal never breaks at launch.
 
 ## Roadmap fit
 
 - **The typed spec schema + `run` + `resolve`** land in **M1 (nix mode)** — the
   reproducible core. Both the authored-config (dynamic) and pre-baked forms fall
   out of the same schema.
-- **pre-baked / nix-mode is M1**: `resolve`-then-freeze over a *supplied* closure
-  (`closureInfo`), no query.
+- **pre-baked / nix-mode is M1**: `resolve --graph`-then-freeze over a *supplied*
+  `exportReferencesGraph`, no query.
 - **`wrap`** exists today (M0) in an exe-derived form; the redesign relocates it
   into the bridge and swaps exe-derivation for a **baked base `root`** (exe
   resolved within it) — dropped outright, no command-line closure discovery. The
@@ -259,10 +274,6 @@ will eventually be answered.
 
 ## Open / deferred
 
-- **Sealed vs delta default** — with `--auto` dropped, the only way a store path
-  enters a sealed spec at launch is an explicit `--mount store:` override on
-  `run`. The open question narrows to just that: when an override adds a store
-  path to a pre-baked spec, does the seal break silently, warn, or require a flag?
 - **Discovered closure (`--auto`)** — parked, not part of v0 (see [Declared-only
   closure](#declared-only-closure-no-discovery)); revisit only if declared-only
   proves too rigid.

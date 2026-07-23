@@ -76,8 +76,9 @@ deliberately aspirational and only make sense once the spec/closure model
   namespace/cgroup/seccomp/`exec` mechanics is a large security-critical surface,
   so *by default* we delegate to an embedded runtime driven as a library (config
   built in memory, no `config.json`). Hand-rolling stays a live option if it can
-  meet that bar. The backend itself (youki, libcrun, bwrap, …) is chosen by
-  security first, then startup cost — see [architecture.md](architecture.md).
+  meet that bar. The runtime is crun (libcrun), driven as an embedded library
+  via FFI with its config passed in memory as a JSON string — no `config.json`
+  — see [architecture.md](architecture.md).
 - **No "just bind-mount the host" escape hatches.** Exposing host `/etc`, host
   `/home`, or the raw D-Bus socket defeats the purpose. Where exposure is
   unavoidable it must be explicit, narrow, and visible in config — never a
@@ -116,8 +117,9 @@ deliberately aspirational and only make sense once the spec/closure model
   OCI runtime to `exec` the target. The shipped deliverable. Knows nothing about
   Nix evaluation.
 - **Spec** — the description of one sandbox's *runtime concerns* (namespaces,
-  ids, env, dbus rules, seccomp, exec args, a pointer to the rootfs), optionally
-  carrying its resolved `closure:`. Synthesized in memory by `wrap`,
+  ids, env, dbus rules, seccomp, exec args, and its `root` rootfs), carrying its
+  resolved `closure:` — required for `run`, where an unbuilt spec fails loud.
+  Synthesized in memory by `wrap`,
   hand-authored, or frozen by `pierogi resolve`; serialized into the store by nix
   mode. Exact format mostly open; the synthetic-identity slice is pinned early.
 - **`pierogi-synth`** — the single Rust library of synthetic-file builders

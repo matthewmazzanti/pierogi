@@ -29,9 +29,11 @@ spec → OCI-spec translation in its thinnest form, project plumbing.
       `pierogi-synth` in M4.)
 - [x] Minimal in-memory spec struct — only the fields the spike needs.
 - [x] Backend trait + a thin spec → in-memory `oci-spec` translation.
-- [x] **Drive `youki` `libcontainer` in-process** (rootless) to
+- [x] **Drive `crun` in-process** (via the `libcrun` FFI shim, rootless) to
       `create → start → wait → teardown` a `bash` in user + mount + pid
-      namespaces, over a minimal store-closure rootfs.
+      namespaces, over a minimal store-closure rootfs. *(Started on `youki`
+      `libcontainer`, but switched to `crun`: youki couldn't RO-remount a
+      `/nix/store` rootfs.)*
 - [x] Answer the embedding questions: backend choice, process-model cost, pid-1
       behavior. First cold-start number recorded (see startup-performance.md).
 - [x] Nix flake builds the binary; CI: build/test/clippy/rustfmt.
@@ -55,34 +57,36 @@ to end — the parts this whole design hinges on. **Not** the module/config laye
 one.
 
 **Forces:** the typed spec schema (`serde`), the mode-agnostic engine realization
-tail, the pluggable (supplied) closure source, the self-contained spec artifact.
+tail, the in-process closure traversal, the self-contained spec artifact.
 
-- [x] Typed `Spec` / `Mount` / `Resolved` + `serde` (the v0 schema — see
+- [x] Typed `Spec` / `Mount` / `Closure` + `serde` (the v0 schema — see
       [spec.md](spec.md)), replacing M0's ad-hoc `SpecInputs`.
-- [x] `resolve()`: seeds = `root ∪ store_refs(mounts)`; `closure_of` **pluggable**
-      — live `nix-store --query --requisites` (host) *or* a supplied list; stamp
-      `{from, paths}`. Reuse the `PIEROGI_CLOSURE` validation.
-- [x] Refactor `build_spec` to consume a **resolved** `Spec`: `closure.paths` →
-      identity binds, `mounts` → OCI mounts (`Store`/`Host`/`Tmpfs`; `Overlay`
-      after — still stubbed), `env` → `process.env`, `exec` → argv.
+- [x] `resolve()`: seeds = `root ∪ store_refs(mounts)` (`store_refs` matches only
+      `Overlay` lowers); no live query — traverse Nix's `exportReferencesGraph`
+      (JSON via `__structuredAttrs`) in-process from the seeds; stamp
+      `{seeds, resolved}`.
+- [x] Refactor `build_spec` to consume a **resolved** `Spec`: `closure.resolved`
+      → identity binds, `mounts` → OCI mounts (`Host`/`Tmpfs`; `Overlay` after —
+      still stubbed), `env` → `process.env`, `exec` → argv.
 - [x] `pierogi run <spec.json>` — load, closure present ⇒ no query, realize,
       launch. `pierogi run <store-path>` is the *same* path: the nix-mode
       artifact is just a resolved spec file (see the builder item), so a store
       path is a `spec.json` that happens to live in the store.
-- [x] `pierogi resolve <spec>` (freeze → bake `closure:`) incl. `resolve
-      --closure <store-paths>` for the build-time supplied path.
+- [x] `pierogi resolve <spec>` (freeze → bake `closure:`) via `resolve --graph
+      <exportReferencesGraph JSON>` for the build-time reference graph.
 - [ ] Minimal Nix builder: `root = buildEnv/pkgs` **with a hand-rolled `/etc`**
       (fixed `passwd`/`group`/`hostname` written as Nix strings, baked into the
-      root — real files, authored by hand, *not* synth-generated), `closureInfo {
-      rootPaths = seeds }` → `paths`, run `resolve --closure` → emit a
+      root — real files, authored by hand, *not* synth-generated), feed the
+      seeds' `exportReferencesGraph` via `__structuredAttrs`
+      (`$NIX_ATTRS_JSON_FILE`), run `resolve --graph` → emit a
       **self-contained `spec.json` store path** (a single JSON file, not a
-      directory: `closure.paths` name the closure absolutely, so no `rootfs`
+      directory: `closure.resolved` names the closure absolutely, so no `rootfs`
       entry is needed and Nix pins the closure via the path strings it contains).
       See [spec.md](spec.md#nix-mode-closure-source-build-time).
 
 **Acceptance:**
 - `pierogi run <hand-authored spec.json>` launches `bash` from its declared
-  closure with **no `nix-store` query** (closure supplied). ✅
+  closure with **no live Nix query** (closure already resolved in the spec). ✅
 - `nix build` produces a self-contained `spec.json` store path that `pierogi run
   <path>` launches into the same shell.
 - inside it, `cat /etc/passwd` shows the **hand-rolled** file baked into the root
@@ -271,8 +275,9 @@ is **interest-and-uncertainty-driven**, a deliberate departure from harden-first
 - **The spike (M0) still leads** — in-process runtime embedding was the biggest
   unknown; everything else builds on it. That much is unchanged.
 - **Nix-mode (M1) comes next** because the spec → supplied-closure → engine loop
-  is the design's core bet, and proving it end-to-end (schema, `closureInfo`,
-  self-contained resolved-spec artifact) validates the whole model cheaply —
+  is the design's core bet, and proving it end-to-end (schema,
+  `exportReferencesGraph` traversal, self-contained resolved-spec artifact)
+  validates the whole model cheaply —
   crudely, reusing M0's lack of hardening.
 - **D-Bus (M2) and GPU/Wayland (M3) are pulled forward** because they're the
   *novel, uncertain* integrations — proxying sockets and narrowing device access
