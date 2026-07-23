@@ -15,7 +15,6 @@
 //! present in the sandbox and fails at exec. A present `closure` short-circuits
 //! the whole query (the sealed fast-path), no Nix call.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -30,18 +29,25 @@ fn seeds(spec: &Spec) -> Vec<StorePath> {
     seeds
 }
 
-/// Fill `spec.closure` if absent. A present closure short-circuits the full
-/// query (see [`resolve_sealed`] for the sealed-spec cases).
+/// Fill `spec.closure` if absent. A present closure is **authoritative** — used
+/// verbatim, no query and no seed comparison.
+///
+/// There is deliberately no seed-drift check. With `--mount store:` gone,
+/// nothing at runtime can change a sealed spec's seeds (overrides are
+/// host/tmpfs/env/argv only, none of them seeds), so the only way declared seeds
+/// could diverge from `closure.from` is a hand-edit that skipped re-resolving —
+/// a "don't hold it wrong" not worth recomputing `seeds()` every launch to
+/// catch. `closure.from` stays as provenance: parity-check it against a fresh
+/// `resolve` out-of-band if you want to detect staleness.
 pub fn resolve(spec: &mut Spec) -> Result<()> {
-    let seeds = seeds(spec);
-
     if spec.closure.is_some() {
-        return resolve_sealed(spec, seeds);
+        return Ok(());
     }
 
     // v0: identity-bind the whole closure — no relocated-seed drop yet (that
     // needs the reference graph; the extra binds are always safe). So
     // `paths` = the full closure, `from` = the seeds.
+    let seeds = seeds(spec);
     let mut paths = closure_of(&seeds)?
         .into_iter()
         .map(StorePath::new)
@@ -50,47 +56,6 @@ pub fn resolve(spec: &mut Spec) -> Result<()> {
     paths.sort();
 
     spec.closure = Some(Resolved { from: seeds, paths });
-    Ok(())
-}
-
-/// Handle a spec that already carries a `closure`, comparing its stamp
-/// (`closure.from`) against the currently declared `seeds`:
-///
-/// * **Seeds unchanged** → sealed fast-path: no query at all.
-/// * **New seeds beyond the stamp** → **fail loud.** A sealed spec's closure is
-///   frozen; a seed it never resolved would need `/nix/store/<hash>` mountpoints
-///   the sealed `root` never baked. There is no seal-break / delta-recompute —
-///   dropping runtime store additions was the whole point (`--mount store:` is
-///   gone; only a hand-edited sealed spec can reach here). Re-resolve from the
-///   unsealed spec to change the closure.
-/// * **Seeds only removed/changed, none added** → the extra sealed paths are
-///   harmless; warn about drift and proceed with the sealed set as-is.
-fn resolve_sealed(spec: &mut Spec, seeds: Vec<StorePath>) -> Result<()> {
-    let closure = spec
-        .closure
-        .as_ref()
-        .expect("caller checked closure is present");
-    let stamped: BTreeSet<StorePath> = closure.from.iter().cloned().collect();
-
-    let declared: BTreeSet<StorePath> = seeds.iter().cloned().collect();
-    let added: Vec<StorePath> = declared.difference(&stamped).cloned().collect();
-
-    if !added.is_empty() {
-        bail!(
-            "sealed spec gained {} seed(s) its closure never resolved \
-             (e.g. {}); the closure is frozen at seal time. Re-resolve from the \
-             unsealed spec to change it.",
-            added.len(),
-            added[0]
-        );
-    }
-
-    if declared != stamped {
-        eprintln!(
-            "pierogi: warning: closure.from does not match declared seeds \
-             (spec may have drifted since it was resolved)"
-        );
-    }
     Ok(())
 }
 
@@ -219,10 +184,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_bails_when_store_seed_added_to_sealed() {
+    fn resolve_sealed_uses_stamped_closure_ignoring_drift() {
         // A spec sealed to just `root`, now carrying an extra store mount seed
         // (only reachable by hand-editing — `--mount store:` is gone). The
-        // closure is frozen at seal time, so this must fail loud, not recompute.
+        // stamped closure is authoritative: used verbatim, no query, no error,
+        // no seed comparison.
         let mut spec = spec_with(
             "/nix/store/aaaa-root",
             vec![Mount::Store {
@@ -235,8 +201,10 @@ mod tests {
             paths: vec![StorePath::new("/nix/store/aaaa-root").unwrap()],
         });
 
-        // No Nix daemon is touched: the added seed is rejected before any query.
-        let err = resolve(&mut spec).unwrap_err();
-        assert!(err.to_string().contains("frozen"), "got: {err}");
+        // No Nix daemon is touched: the closure returns unchanged.
+        resolve(&mut spec).unwrap();
+        let c = spec.closure.as_ref().unwrap();
+        assert_eq!(c.paths.len(), 1);
+        assert_eq!(c.paths[0].to_string(), "/nix/store/aaaa-root");
     }
 }

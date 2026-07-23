@@ -25,10 +25,14 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   sections and the field note are updated; the `Mount` model, closure-fold, and
   seal-break narrative (`execution-modes.md` too) still describe the old
   dynamic-closure world. Sweep once the direction is committed.
-- [ ] **`/tmp` as policy?** Currently a spec `tmpfs` mount onto a baked `/tmp`
-  dir. Consider whether writable `/tmp` (and `/dev`, `/proc`) should be
-  engine-essential base mounts vs. spec-declared. Leaning spec-declared (no
-  policy), but most sealed images want `/tmp`.
+- [x] **`/tmp` stays spec-declared.** DECIDED: writable `/tmp` is a spec `tmpfs`
+  mount onto a baked `/tmp` dir, not an engine-essential base mount — the engine
+  carries no policy. (`/proc`, `/dev` remain base mounts as runtime surface.)
+- [x] **Dropped the sealed-spec seed-drift check.** With `--mount store:` gone,
+  nothing at runtime can change a sealed spec's seeds, so `resolve()` now uses a
+  present `closure` verbatim — no `seeds()` recompute, no drift bail/warn. The
+  only divergence path left is a hand-edit-without-re-resolve ("don't hold it
+  wrong"). `closure.from` kept as out-of-band provenance.
 
 ## tty relay polish (`src/tty.rs`)
 

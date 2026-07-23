@@ -282,9 +282,14 @@ time**. Consequences that supersede parts of this doc:
   references `/nix/store/<root-hash>` and `root` needs no self-mountpoint.
 - **No runtime store additions.** A store path added at launch would need a
   `/nix/store/<hash>` mountpoint the image never baked. So `--mount store:` is
-  gone and a sealed spec that gains a seed **fails loud** (no seal-break /
-  delta-recompute). A different closure means a different image. `--mount host:`
-  / `tmpfs:` still work, but only onto dests the image already baked.
+  gone (no seal-break / delta-recompute) and a different closure means a
+  different image. `--mount host:` / `tmpfs:` still work, but only onto dests the
+  image already baked.
+- **A present `closure` is authoritative.** `resolve()` uses it verbatim — no
+  query and no seed-drift check. With no runtime path that can change a sealed
+  spec's seeds, comparing declared seeds to `closure.from` every launch would
+  only catch a hand-edit-without-re-resolve, so it's dropped. `closure.from`
+  stays as provenance to parity-check against a fresh `resolve` out-of-band.
 - **File-vs-dir mountpoints move to build time.** A file store path (e.g. a
   `writeText` `/etc` file) needs a file mountpoint, a dir needs a dir — the root
   derivation stats each closure member and bakes the matching kind (what
