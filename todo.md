@@ -26,6 +26,18 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   Its lower must be in `closure` and its `dest` baked; it's the last `Mount`
   variant that names a store `source` (so the only `store_refs` contributor).
   Revisit realization when it lands.
+- [ ] **Derive/validate `resolved` by traversing the reference graph from
+  `seeds`.** `resolve --closure` today trusts `closureInfo`'s flat `store-paths`
+  list wholesale. Instead, take the reference graph (`closureInfo`'s
+  `registration`, or `exportReferencesGraph`) and walk requisites from `seeds`
+  ourselves: `resolved = closure(seeds) \ {root}`. Buys: (a) a real check that
+  the supplied set *is* exactly the closure of the declared seeds — catches a
+  tampered/mismatched `--closure`, and lets us drop `root` ourselves rather than
+  relying on the seed-from-deps trick in `bash-sandbox.nix`; (b) the graph needed
+  for the relocated-seed drop (a seed nothing references need not be identity-
+  bound); (c) makes `seeds` a load-bearing input, not just a stamp. Note this
+  wants `seeds` to be the **complete** traversal-root set, i.e. to include `root`
+  (see the root-in-`seeds` note below).
 - [ ] **Reconcile the rest of `docs/spec.md` + `execution-modes.md`.** The schema
   block, `closure` field docs, realization, and the Sealed-rootfs section are
   updated. **Still stale (describe the old dynamic-closure/fold world):** the
@@ -35,6 +47,16 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
 - [x] **`/tmp` stays spec-declared.** DECIDED: writable `/tmp` is a spec `tmpfs`
   mount onto a baked `/tmp` dir, not an engine-essential base mount — the engine
   carries no policy. (`/proc`, `/dev` remain base mounts as runtime surface.)
+- [ ] **`root` is repeated in `seeds` — decide the framing.** `seeds` currently =
+  `root` + overlay lowers, so `root` also lives in `spec.root`. Two coherent
+  readings: (1) **seeds = the complete graph-traversal root set** (includes
+  `root`); `resolved = closure(seeds) \ {root}`; `spec.root` is a convenience
+  denormalization. Self-contained provenance, and the traversal todo above reads
+  `seeds` directly. (2) **seeds = extra roots beyond `root`** (excludes it);
+  traversal roots = `{root} ∪ seeds`; no duplication, but `seeds` is empty for
+  every spec today (no Store mounts, Overlay deferred) and provenance isn't
+  self-contained. Leaning (1): the "repeat" is what makes the traversal
+  self-describing, and `[root]` is a more honest empty-ish value than `[]`.
 - [x] **Dropped the sealed-spec seed-drift check.** With `--mount store:` gone,
   nothing at runtime can change a sealed spec's seeds, so `resolve()` now uses a
   present `closure` verbatim — no `seeds()` recompute, no drift bail/warn. The
