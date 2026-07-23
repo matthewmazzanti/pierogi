@@ -18,6 +18,11 @@ fn main() {
 
     cc::Build::new()
         .file("csrc/shim.c")
+        // The nix cc-wrapper injects _FORTIFY_SOURCE via its hardening machinery
+        // (NIX_HARDENING_ENABLE=…fortify…), but supplies no -O; FORTIFY requires
+        // optimization, so the dev profile's OPT_LEVEL=0 otherwise warns. Pin -O2
+        // for the shim so FORTIFY is active regardless of the Rust profile.
+        .opt_level(2)
         .include(format!("{crun_dev}/include/crun"))
         .include(format!("{crun_dev}/include"))
         .compile("pierogi_crun_shim");
