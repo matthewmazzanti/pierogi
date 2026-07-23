@@ -121,8 +121,9 @@ pub struct Closure {
     /// against a fresh build out-of-band.
     pub seeds: Vec<StorePath>,
     /// The flat identity-bind set bound under `/nix/store`, **canonically
-    /// sorted** so any two builds of the same inputs are byte-identical.
-    /// Excludes `root` (the `/` mount, not a bind). Filled at build by `resolve
+    /// sorted** so any two builds of the same inputs are byte-identical. The
+    /// full closure of `seeds`, **including `root`** — root is identity-bound at
+    /// `/nix/store/<self>` *and* mounted at `/`. Filled at build by `resolve
     /// --closure`; `run` requires it.
     pub resolved: Vec<StorePath>,
 }

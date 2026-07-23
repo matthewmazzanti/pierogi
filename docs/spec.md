@@ -95,7 +95,8 @@ already baked. (This replaces the earlier fold-vs-no-fold `Store` model; see
     **canonically sorted** (lexicographic by store path). Order is cosmetic to
     the engine (it binds a set), but sorting makes any two builds of the same
     inputs *byte-identical*, so the artifact is reproducible regardless of closure
-    source. **Excludes `root`** — that's the `/` mount, not a `/nix/store` bind.
+    source. The full closure of `seeds`, **including `root`** (identity-bound at
+    `/nix/store/<self>` as well as being the `/` mount).
   - **`seeds`** — the provenance stamp: the seed store paths this closure was
     built from (`root` + overlay-lower sources). Since store paths are content
     hashes it's a complete, query-free fingerprint, but nothing reads it at
@@ -255,22 +256,25 @@ graph, so it's no shortcut.)
 - `env` → `process.env`, verbatim.
 - OCI `root.path` **is `root`** — the sealed rootfs store path, mounted at `/`
   and remounted read-only. `root` carries the whole skeleton (`/etc`, `/bin`,
-  and the `/proc`, `/dev`, `/tmp`, `/nix/store/<hash>` mountpoint dirs), baked at
-  build time by the root derivation, so there is **no empty scaffold to
-  assemble** and no launch-time `mkdir`. `root` is therefore *excluded* from the
-  `/nix/store` identity binds (it's the `/` mount, not a `/nix/store` entry) —
-  see the sealed-rootfs note below.
+  and the `/proc`, `/dev`, `/tmp`, `/nix/store/<hash>` mountpoint dirs —
+  *including its own* `/nix/store/<self>`), baked at build time, so there is **no
+  empty scaffold to assemble** and no launch-time `mkdir`. `root` is **also** in
+  `closure.resolved`: identity-bound at `/nix/store/<self>` so absolute
+  references into it resolve, on top of being the `/` mount — see the
+  sealed-rootfs note below.
 
 ### Sealed rootfs (implemented on the `sealed-rootfs` branch)
 
 The rootfs is a single store path with the mount topology **frozen at build
 time**. Consequences that supersede parts of this doc:
 
-- **`root` is the rootfs, not a closure bind.** The mountpoint dirs it carries
-  depend on the closure, so the closure is seeded from `root`'s *dependencies*
-  (not `root`), which breaks the circularity: deps are buildable before `root`.
-  `PATH` points at `/bin` (`root`'s own `bin/`, surfaced at `/`), so nothing
-  references `/nix/store/<root-hash>` and `root` needs no self-mountpoint.
+- **`root` is the rootfs *and* a closure bind.** It's mounted at `/` and
+  identity-bound at `/nix/store/<self>`, so absolute references into it resolve
+  either way. The circularity of "root's mountpoint tree depends on root's
+  closure" is broken in two places: dep mountpoints are baked from `root`'s
+  *dependencies* (buildable before `root`), and root's *own* `/nix/store/<self>`
+  mountpoint is baked from `$out` — which nix fixes before the builder runs
+  (input-addressed), so root's hash is known during its own build.
 - **No runtime query — pre-bake only.** The live `nix-store --query` path is
   gone entirely (`closure_of` and the `PIEROGI_CLOSURE` stub deleted). A spec's
   `closure` is *always* supplied at build (`closureInfo` → `resolve --closure`);

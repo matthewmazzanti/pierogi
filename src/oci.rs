@@ -11,11 +11,11 @@
 //!   absolute path as `argv[0]`).
 //! * OCI `root.path` **is `root`** — the sealed rootfs store path, mounted at
 //!   `/` and remounted read-only. It carries the whole skeleton (`/etc`, `/bin`,
-//!   and the `/proc`, `/dev`, `/tmp`, `/nix/store/<hash>` mountpoint dirs), so
-//!   there is no empty scaffold to assemble. `root` is therefore **excluded**
-//!   from the `/nix/store` identity binds: it is the `/` mount, not a
-//!   `/nix/store/<hash>` entry, and nothing references it by store path
-//!   (`PATH` points at `/bin`, which is `root`'s own `bin/` at `/`).
+//!   and the `/proc`, `/dev`, `/tmp`, `/nix/store/<hash>` mountpoint dirs,
+//!   *including its own* `/nix/store/<self>`), so there is no empty scaffold to
+//!   assemble. `root` is **also** in `closure.resolved`: identity-bound at
+//!   `/nix/store/<self>` so absolute references into it resolve, on top of being
+//!   the `/` mount.
 
 use std::path::{Path, PathBuf};
 
@@ -91,14 +91,11 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
     // mountpoint dirs baked into `root`. Emitted first so any relocated/overlay
     // lower exists before it's referenced.
     //
-    // `root` itself is skipped: it's the `/` mount (OCI root.path below), not a
-    // `/nix/store/<hash>` entry, and has no baked self-mountpoint. A supplied
-    // build-time closure seeds from root's *deps* and already omits it; this
-    // skip is a cheap guard against a hand-written `resolved` that included it.
+    // `root` is included, not skipped: it's identity-bound at /nix/store/<self>
+    // (onto the self-mountpoint the root derivation bakes from `$out`), so an
+    // absolute reference into root resolves — while `root` is *also* the `/`
+    // mount (OCI root.path below). Both point at the same store path.
     for path in &closure.resolved {
-        if path == &spec.root {
-            continue;
-        }
         let p = path.to_string();
         mounts.push(bind_mount(&p, &p, &["bind", "ro"])?);
     }

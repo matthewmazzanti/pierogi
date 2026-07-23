@@ -13,25 +13,30 @@
 #
 # The pipeline it exercises:
 #
-#   deps (bash, coreutils, /etc files)            the runtime closure seeds
+#   deps (bash, coreutils, /etc files)            the runtime deps
 #     │
-#     ├─ closureInfo { rootPaths = deps; }  →  store-paths (the bind set)
-#     │      │
-#     │      └─ used *twice*: to bake the /nix/store mountpoint tree into root,
-#     │         and (re-sorted) as the supplied closure the spec stamps.
+#     ├─ closureInfo { rootPaths = deps; }  →  store-paths   (bakes dep mountpoints)
 #     │
-#     ├─ root (symlink farm + baked /etc + baked mountpoints)   the sealed rootfs
+#     ├─ root (symlink farm + baked /etc + baked mountpoints, incl. its OWN)
+#     │     │
+#     │     └─ closureInfo { rootPaths = [root]; }  →  store-paths   (deps + root)
+#     │            │
+#     │            └─ the supplied closure the spec stamps as `resolved`
 #     │
 #     ├─ unresolved spec.json  (exec/root/mounts/env, no closure)
-#     └─ pierogi resolve <spec> --closure store-paths  →  $out  (resolved spec.json)
+#     └─ pierogi resolve <spec> --closure store-paths  →  $out  (built spec.json)
 #
-# The closure is seeded from the **deps, not `root`** — deliberately. `root`'s
-# content (the mountpoint dirs) depends on the closure, so seeding the closure
-# from `root` would be circular. deps don't depend on `root`, so `closureInfo`
-# resolves fine before `root` is built, and `root` itself is *excluded* from the
-# bind set: it's the `/` mount, not a `/nix/store` entry (`oci::build_spec` skips
-# it). `PATH` points at `/bin` — `root`'s own `bin/`, surfaced at `/` — so
-# nothing references `/nix/store/<root-hash>` and there is no self-mountpoint.
+# Two `closureInfo` calls, because the mountpoint-baking and the spec-stamp have
+# different circularity constraints:
+#
+#   * **Baking dep mountpoints** must not depend on `root` (its content is what
+#     we're building), so it seeds from `deps` — buildable before `root` exists.
+#     `root`'s *own* /nix/store/<self> mountpoint is baked from `$out`, which nix
+#     fixes before the builder runs (input-addressed), so there's no circularity.
+#   * **The spec's `resolved`** is the honest full closure `closureInfo{[root]}`
+#     (= deps + root), computed *after* `root` is built. `root` IS in the bind
+#     set: identity-bound at /nix/store/<self> (so absolute references to it
+#     resolve) *and* mounted at `/`. Nothing is excluded.
 #
 # No `nix-store` query runs at build: the build sandbox has no daemon, so the
 # closure is *supplied* by `closureInfo`.
@@ -55,14 +60,13 @@ let
     pierogi
   '';
 
-  # The runtime deps — everything the sandbox binds under /nix/store. `root`
-  # itself is NOT here (it's the / mount, not a bind), which is also what keeps
-  # the closure non-circular: these are all buildable before `root` exists.
+  # The runtime deps — root's references. `root` itself is NOT here: it doesn't
+  # exist yet, and seeding from it would be circular. These are all buildable
+  # before `root`, so they drive the baked dep-mountpoint tree.
   deps = [ pkgs.bash pkgs.coreutils etcPasswd etcGroup etcHostname ];
 
-  # The supplied closure of the deps. Seeded from deps (not root) — see header.
-  # `store-paths` drives both the baked mountpoint tree and the stamped closure.
-  closure = pkgs.closureInfo { rootPaths = deps; };
+  # The supplied closure of the deps — for baking dep mountpoints only.
+  depsClosure = pkgs.closureInfo { rootPaths = deps; };
 
   # root: the sealed rootfs. A symlink farm for /bin, hand-rolled /etc, and every
   # mountpoint baked in — no launch-time scaffold.
@@ -109,8 +113,19 @@ let
         mkdir -p "$(dirname "$out$p")"
         touch "$out$p"
       fi
-    done < ${closure}/store-paths
+    done < ${depsClosure}/store-paths
+
+    # `root`'s OWN identity mountpoint. `$out` is fixed before this builder runs
+    # (input-addressed), so we know root's store path here — no circularity. This
+    # is what lets `root` be identity-bound at /nix/store/<self> at launch, so an
+    # absolute reference into root (e.g. a `/nix/store/<root>/bin` PATH or a
+    # self-referential symlink) resolves — while root is also the `/` mount.
+    mkdir -p "$out/nix/store/$(basename "$out")"
   '';
+
+  # The honest full closure of `root` (deps + root itself), computed after root
+  # is built. This is what the spec stamps as `closure.resolved`.
+  fullClosure = pkgs.closureInfo { rootPaths = [ root ]; };
 
   # The sources spec: no `closure:` (resolve --closure stamps it). Internal
   # input only — not runnable, since there is no live-query path.
@@ -126,7 +141,8 @@ let
       { type = "tmpfs"; dest = "/tmp"; }
     ];
     env = {
-      # /bin is root's own bin/, surfaced at / — no /nix/store/<root-hash> ref.
+      # /bin is root's own bin/, surfaced at /. `/nix/store/<root>/bin` would
+      # work too now that root is identity-bound, but /bin is shorter.
       PATH = "/bin";
       HOME = "/home/pierogi";
       TERM = "xterm-256color";
@@ -137,13 +153,13 @@ let
 
 in
 {
-  # Stamp: supplied closure, no query. $out is the built spec.json itself. The
-  # supplied closure omits `root` (it's the / mount, excluded from binds);
-  # `resolve` stamps `closure = { seeds = [root], resolved = <deps closure> }`.
-  # Building this also realizes the rootfs and its whole closure into the store,
-  # so every bind the spec names is present.
+  # Stamp: supplied full closure (deps + root), no query. $out is the built
+  # spec.json itself. `resolve` stamps
+  # `closure = { seeds = [root], resolved = <deps + root> }`. Building this also
+  # realizes the rootfs and its whole closure into the store, so every bind the
+  # spec names is present.
   resolved = pkgs.runCommand "pierogi-bash-sandbox.json" { } ''
     ${pierogi}/bin/pierogi resolve ${unresolvedSpecFile} \
-      --closure ${closure}/store-paths > $out
+      --closure ${fullClosure}/store-paths > $out
   '';
 }
