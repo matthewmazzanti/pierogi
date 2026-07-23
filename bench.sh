@@ -23,7 +23,7 @@ RUNS=${1:-50}
 
 # Build the runtime binary once, release: debug + per-invocation `cargo run`
 # overhead would swamp the millisecond-scale startup we're measuring.
-cargo build --release --features crun >/dev/null
+cargo build --release >/dev/null
 BIN=$PWD/target/release/pierogi
 
 # The pre-baked sealed spec (rootfs + stamped closure). Built via Nix, which
