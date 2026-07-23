@@ -51,7 +51,7 @@ struct Cli {
 enum Cmd {
     /// Run a sandbox from a **pre-baked** spec: `pierogi run <spec.json>`. The
     /// spec must carry its `closure:` — there is no runtime Nix query. Build one
-    /// first with `pierogi resolve … --closure` (or a Nix builder).
+    /// first with `pierogi resolve … --graph` (or a Nix builder).
     ///
     /// CLI overrides overlay onto the loaded spec before it runs (the `run`
     /// bridge): env, hostname, argv, and additive host/tmpfs mounts — all
@@ -86,17 +86,18 @@ enum Cmd {
         argv: Vec<String>,
     },
 
-    /// Build a spec: stamp the supplied `--closure` into `closure:` and print
-    /// the frozen spec. Supplied only — no live `nix-store` query (pierogi is
-    /// pre-bake). Driven by the Nix builder that emits the spec.
+    /// Build a spec: traverse the reference graph from the spec's seeds and
+    /// stamp the resulting `closure:`, then print the frozen spec. No live
+    /// `nix-store` query — the graph is supplied. Driven by the Nix builder that
+    /// emits the spec (via `exportReferencesGraph`).
     Resolve {
         /// Path to a pierogi `spec.json`.
         spec: PathBuf,
 
-        /// A file of store paths (one per line, `closureInfo` `store-paths`
-        /// shape) supplying the closure. Required.
+        /// A Nix `exportReferencesGraph` dump of the seeds' reference graph.
+        /// pierogi traverses it from the spec's seeds. Required.
         #[arg(long)]
-        closure: PathBuf,
+        graph: PathBuf,
     },
 }
 
@@ -124,6 +125,6 @@ fn main() -> Result<()> {
             let overrides = overrides::Overrides::parse(env, hostname, mount, argv)?;
             run::run_spec(spec, backend, overrides)
         }
-        Cmd::Resolve { spec, closure } => run::resolve_cmd(spec, closure),
+        Cmd::Resolve { spec, graph } => run::resolve_cmd(spec, graph),
     }
 }

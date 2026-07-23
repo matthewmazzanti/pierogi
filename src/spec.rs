@@ -86,7 +86,7 @@ pub struct Spec {
     pub hostname: String,
     /// The **built** store view — `{ seeds, resolved }`. `Some` ⇒ pre-baked and
     /// engine-ready; `None` ⇒ unbuilt (there is no runtime query, so `run`
-    /// requires it — build with `resolve --closure`).
+    /// requires it — build with `resolve --graph`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closure: Option<Closure>,
 }
@@ -124,7 +124,7 @@ pub struct Closure {
     /// sorted** so any two builds of the same inputs are byte-identical. The
     /// full closure of `seeds`, **including `root`** — root is identity-bound at
     /// `/nix/store/<self>` *and* mounted at `/`. Filled at build by `resolve
-    /// --closure`; `run` requires it.
+    /// --graph`; `run` requires it.
     pub resolved: Vec<StorePath>,
 }
 

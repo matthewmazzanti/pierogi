@@ -5,9 +5,9 @@
 //! * [`run_spec`] — the `run` verb: load a `spec.json`, apply CLI overrides,
 //!   launch. The spec must already carry its `closure:` (there is no runtime
 //!   query — pierogi is pre-bake only).
-//! * [`resolve_cmd`] — the `resolve` verb: load, stamp a **supplied**
-//!   `--closure` (build-time; `closureInfo`'s `store-paths`), print the built
-//!   spec. This is the sole path that fills a closure.
+//! * [`resolve_cmd`] — the `resolve` verb: load, traverse a supplied `--graph`
+//!   (build-time; Nix's `exportReferencesGraph` JSON) from the spec's seeds,
+//!   print the built spec. This is the sole path that fills a closure.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 
 use crate::oci::{build_spec, RealizeInputs};
 use crate::overrides::Overrides;
-use crate::resolve::{resolve, resolve_supplied};
+use crate::resolve::{resolve, resolve_from_graph};
 use crate::runtime::Backend;
 use crate::spec::Spec;
 use crate::tty::ConsoleRelay;
@@ -34,12 +34,14 @@ pub fn run_spec(spec_path: PathBuf, backend: Backend, overrides: Overrides) -> R
     launch(spec, backend)
 }
 
-/// `pierogi resolve <spec> --closure <store-paths>` — build a spec: stamp the
-/// supplied closure (no query) and print it. The build-time freeze entry.
-pub fn resolve_cmd(spec_path: PathBuf, closure_file: PathBuf) -> Result<()> {
+/// `pierogi resolve <spec> --graph <reference-graph>` — build a spec: traverse
+/// the `exportReferencesGraph` dump from the spec's seeds, stamp the resulting
+/// closure, and print it. The build-time freeze entry (no query).
+pub fn resolve_cmd(spec_path: PathBuf, graph_file: PathBuf) -> Result<()> {
     let mut spec = load_spec(&spec_path)?;
-    let supplied = read_store_paths(&closure_file)?;
-    resolve_supplied(&mut spec, supplied)?;
+    let graph = std::fs::read_to_string(&graph_file)
+        .with_context(|| format!("reading {}", graph_file.display()))?;
+    resolve_from_graph(&mut spec, &graph)?;
     // Serialize the built spec to stdout (the frozen artifact).
     let json = serde_json::to_string_pretty(&spec).context("serializing built spec")?;
     println!("{json}");
@@ -109,19 +111,6 @@ fn launch(spec: Spec, backend: Backend) -> Result<()> {
 fn load_spec(path: &Path) -> Result<Spec> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
-}
-
-/// Read a closure list from a file (one store path per line — the shape of
-/// `closureInfo`'s `store-paths`). Validation happens in `resolve_supplied`.
-fn read_store_paths(path: &Path) -> Result<Vec<PathBuf>> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect())
 }
 
 /// Where to lay out the bundle/state.

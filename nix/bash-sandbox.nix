@@ -9,7 +9,7 @@
 #
 # There is no runtime query, so the only runnable artifact is the **built** spec
 # (`resolved`): closure stamped in at build. The sources-only spec exists only
-# as the internal input to `resolve --closure`, not as a runnable output.
+# as the internal input to `resolve --graph`, not as a runnable output.
 #
 # The pipeline it exercises:
 #
@@ -19,27 +19,30 @@
 #     │
 #     ├─ root (symlink farm + baked /etc + baked mountpoints, incl. its OWN)
 #     │     │
-#     │     └─ closureInfo { rootPaths = [root]; }  →  store-paths   (deps + root)
-#     │            │
-#     │            └─ the supplied closure the spec stamps as `resolved`
+#     │     └─ __structuredAttrs + exportReferencesGraph.closure = [root]
+#     │            │  (Nix expands the graph as JSON in $NIX_ATTRS_JSON_FILE)
+#     │            └─ pierogi traverses it from the spec's seeds → `resolved`
 #     │
 #     ├─ unresolved spec.json  (exec/root/mounts/env, no closure)
-#     └─ pierogi resolve <spec> --closure store-paths  →  $out  (built spec.json)
+#     └─ pierogi resolve <spec> --graph $NIX_ATTRS_JSON_FILE  →  built spec.json
 #
-# Two `closureInfo` calls, because the mountpoint-baking and the spec-stamp have
-# different circularity constraints:
+# Two different closure mechanisms, because baking and the spec-stamp have
+# different constraints:
 #
-#   * **Baking dep mountpoints** must not depend on `root` (its content is what
-#     we're building), so it seeds from `deps` — buildable before `root` exists.
-#     `root`'s *own* /nix/store/<self> mountpoint is baked from `$out`, which nix
-#     fixes before the builder runs (input-addressed), so there's no circularity.
-#   * **The spec's `resolved`** is the honest full closure `closureInfo{[root]}`
-#     (= deps + root), computed *after* `root` is built. `root` IS in the bind
-#     set: identity-bound at /nix/store/<self> (so absolute references to it
-#     resolve) *and* mounted at `/`. Nothing is excluded.
+#   * **Baking dep mountpoints** just needs a flat path list, and must not depend
+#     on `root` (its content is what we're building). `closureInfo { rootPaths =
+#     deps }` gives exactly that — buildable before `root` exists. `root`'s *own*
+#     /nix/store/<self> mountpoint is baked from `$out`, which nix fixes before
+#     the builder runs (input-addressed), so there's no circularity.
+#   * **The spec's `resolved`** is computed by pierogi itself: Nix hands it the
+#     `exportReferencesGraph` of `root` as JSON (deps + root) and `pierogi
+#     resolve` *traverses* it from the spec's seeds. So the bind set is provably
+#     the closure of the declared seeds, not a list taken on faith. `root` IS in
+#     it — identity-bound at /nix/store/<self> and mounted at `/`.
 #
-# No `nix-store` query runs at build: the build sandbox has no daemon, so the
-# closure is *supplied* by `closureInfo`.
+# No `nix-store` query runs at build: the build sandbox has no daemon. The dep
+# list comes from `closureInfo`; the graph from the `exportReferencesGraph`
+# derivation parameter, delivered as JSON via `$NIX_ATTRS_JSON_FILE`.
 { pkgs, pierogi }:
 
 let
@@ -123,11 +126,7 @@ let
     mkdir -p "$out/nix/store/$(basename "$out")"
   '';
 
-  # The honest full closure of `root` (deps + root itself), computed after root
-  # is built. This is what the spec stamps as `closure.resolved`.
-  fullClosure = pkgs.closureInfo { rootPaths = [ root ]; };
-
-  # The sources spec: no `closure:` (resolve --closure stamps it). Internal
+  # The sources spec: no `closure:` (resolve --graph stamps it). Internal
   # input only — not runnable, since there is no live-query path.
   unresolvedSpec = {
     exec = {
@@ -153,13 +152,21 @@ let
 
 in
 {
-  # Stamp: supplied full closure (deps + root), no query. $out is the built
-  # spec.json itself. `resolve` stamps
-  # `closure = { seeds = [root], resolved = <deps + root> }`. Building this also
+  # Build: hand pierogi the reference graph of `root` and let it traverse from
+  # the spec's seeds. `__structuredAttrs` + `exportReferencesGraph.closure =
+  # [root]` makes Nix expand the full graph as the top-level `closure` array of
+  # `$NIX_ATTRS_JSON_FILE` (the same shape `closureInfo` reads: one
+  # `{ path, references, ... }` per closure member); pierogi ignores the rest of
+  # the attrs. `resolve` stamps
+  # `closure = { seeds = [root], resolved = closure(root) }`. Building this also
   # realizes the rootfs and its whole closure into the store, so every bind the
   # spec names is present.
-  resolved = pkgs.runCommand "pierogi-bash-sandbox.json" { } ''
+  resolved = pkgs.runCommand "pierogi-bash-sandbox.json"
+    {
+      __structuredAttrs = true;
+      exportReferencesGraph.closure = [ root ];
+    } ''
     ${pierogi}/bin/pierogi resolve ${unresolvedSpecFile} \
-      --closure ${fullClosure}/store-paths > $out
+      --graph "$NIX_ATTRS_JSON_FILE" > "''${outputs[out]}"
   '';
 }

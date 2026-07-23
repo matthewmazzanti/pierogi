@@ -89,8 +89,9 @@ already baked. (This replaces the earlier fold-vs-no-fold `Store` model; see
 - **`closure`** — the built store view, **`{ seeds, resolved }`**.
   **Present** ⇒ engine-ready, pre-baked. **Absent** ⇒ unbuilt — and since there
   is **no runtime query**, `run` fails loud; build it first with `resolve
-  --closure`. Supplied lists are validated (all under `/nix/store`, non-empty,
-  fail loud — `resolve::validate_closure`).
+  --graph`, which traverses Nix's `exportReferencesGraph` JSON from `seeds`
+  (`resolve::resolve_from_graph`) — every node validated as a top-level store
+  path, fail loud.
   - **`resolved`** — the flat identity-bind set (what actually gets bound),
     **canonically sorted** (lexicographic by store path). Order is cosmetic to
     the engine (it binds a set), but sorting makes any two builds of the same
@@ -277,10 +278,13 @@ time**. Consequences that supersede parts of this doc:
   (input-addressed), so root's hash is known during its own build.
 - **No runtime query — pre-bake only.** The live `nix-store --query` path is
   gone entirely (`closure_of` and the `PIEROGI_CLOSURE` stub deleted). A spec's
-  `closure` is *always* supplied at build (`closureInfo` → `resolve --closure`);
-  `run` on an unbuilt spec **fails loud**. There is no `Mount::Store` type — a
-  bare store mount was a closure seed in disguise (folds are gone), and a
-  relocation is now just a `Host` bind whose deps live in `closure`.
+  `closure` is built at *build time* by traversing a Nix `exportReferencesGraph`
+  dump from the seeds (`resolve --graph`, `resolve::resolve_from_graph`) — pierogi
+  walks the reference graph itself, so `resolved` is provably the closure of the
+  declared seeds rather than a flat list taken on faith. `run` on an unbuilt spec
+  **fails loud**. There is no `Mount::Store` type — a bare store mount was a
+  closure seed in disguise (folds are gone), and a relocation is now just a
+  `Host` bind whose deps live in `closure`.
 - **No runtime store additions.** A store path added at launch would need a
   `/nix/store/<hash>` mountpoint the image never baked, so `--mount store:` is
   gone and a different closure means a different image. `--mount host:` /

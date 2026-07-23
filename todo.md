@@ -26,22 +26,31 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   Its lower must be in `closure` and its `dest` baked; it's the last `Mount`
   variant that names a store `source` (so the only `store_refs` contributor).
   Revisit realization when it lands.
-- [ ] **Derive/validate `resolved` by traversing the reference graph from
-  `seeds`.** `resolve --closure` today trusts `closureInfo`'s flat `store-paths`
-  list wholesale. Instead, take the reference graph (`closureInfo`'s
-  `registration`, or `exportReferencesGraph`) and walk requisites from `seeds`
-  ourselves: `resolved = closure(seeds)` (root included — it's in `seeds`). Buys:
-  (a) a real check that the supplied set *is* exactly the closure of the declared
-  seeds — catches a tampered/mismatched `--closure`; (b) the graph needed for the
-  relocated-seed drop (a seed nothing references need not be identity-bound); (c)
-  makes `seeds` a load-bearing input, not just a stamp. Wants `seeds` to be the
-  **complete** traversal-root set, i.e. to include `root` (see the root-in-`seeds`
-  note below) — which it does.
+- [x] **Traverse the reference graph from `seeds` in-process.** `resolve --graph`
+  takes Nix's `exportReferencesGraph` as JSON and walks requisites from `seeds`
+  itself (`resolve::resolve_from_graph`): `resolved = closure(seeds)`, root
+  included. Catches a tampered/mismatched graph, and makes `seeds` a load-bearing
+  input. The graph is the top-level `closure` array of the `__structuredAttrs`
+  JSON (`$NIX_ATTRS_JSON_FILE`) — same shape `closureInfo` consumes, one
+  `{ path, references }` per node; pierogi serde-parses it and ignores the rest
+  of the attrs. (Note: `.exportReferencesGraph.closure` in that file only echoes
+  the roots; the *expanded* graph is the sibling top-level `.closure` key.)
+  - [ ] **Follow-on: relocated-seed drop.** The graph is now in hand, so a seed
+    nothing references by store path (a relocated, self-contained tree) can be
+    omitted from `resolved` (`from ⊋ paths` in the old prose). Not done — every
+    reachable node is currently kept.
+  - [ ] **Follow-on: bake mountpoints from the same graph.** `bash-sandbox.nix`
+    still uses `closureInfo { rootPaths = deps }` for the flat mkdir list (a
+    separate build, pre-`root`). Could derive it from the deps' `references` JSON
+    instead, dropping `closureInfo` — kept for now as it's a clean multi-root
+    flat-list helper.
 - [ ] **Reconcile the rest of `docs/spec.md` + `execution-modes.md`.** The schema
   block, `closure` field docs, realization, and the Sealed-rootfs section are
   updated. **Still stale (describe the old dynamic-closure/fold world):** the
   "Mount model" section (fold-vs-no-fold table, `Store` prose), "Resolution
-  invariant", the `closureInfo` table's `closure.paths` references, and all five
+  invariant", the "Nix-mode closure source" section (the `closureInfo`
+  three-file table + `resolve --closure`/`--registration` — now
+  `exportReferencesGraph` JSON traversed by `resolve --graph`), and all five
   "Worked examples" (relocation/`from ⊋ paths`, seal-break). Needs a full sweep.
 - [x] **`/tmp` stays spec-declared.** DECIDED: writable `/tmp` is a spec `tmpfs`
   mount onto a baked `/tmp` dir, not an engine-essential base mount — the engine
