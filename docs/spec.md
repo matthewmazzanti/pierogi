@@ -358,11 +358,14 @@ form.
   upper }`, `upper` omitted = ephemeral tmpfs). Relocation is a plain `Host` bind
   of a store path (there is no `Store` variant / `Option<dest>`). All folded into
   the schema above.
-- **TODO — relocated-seed drop.** `resolved` currently keeps every node reachable
-  from the seeds. With the reference graph in hand, a seed nothing references by
-  store path (a self-contained relocated tree) could be dropped from the identity
-  binds — the old "`from ⊋ paths`" optimization. Deferred; the extra binds are
-  always safe.
+- **MOOT — relocated-seed drop.** `resolved` keeps every node reachable from the
+  seeds, and that's fine: the old "`from ⊋ paths`" optimization (drop a seed
+  nothing references by store path) was a `Store`-mount concept the sealed model
+  dissolved. Relocation is now a plain `Host` bind that contributes no seed (never
+  over-binds); overlay lowers are needed at their identity path; and `root` is the
+  only possibly-unreferenced seed, but we identity-bind it deliberately (see
+  [Sealed rootfs](#sealed-rootfs-implemented-on-the-sealed-rootfs-branch)). Nothing
+  droppable remains.
 - **TODO — overlay's operational path & generalization.** The v0 shape (single
   store `source`) is specified; still open: (a) the userns/kernel path —
   unprivileged overlayfs-in-userns needs kernel ≥ 5.11, else a `fuse-overlayfs`

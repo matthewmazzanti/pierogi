@@ -41,10 +41,15 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   `{ path, references }` per node; pierogi serde-parses it and ignores the rest
   of the attrs. (Note: `.exportReferencesGraph.closure` in that file only echoes
   the roots; the *expanded* graph is the sibling top-level `.closure` key.)
-  - [ ] **Follow-on: relocated-seed drop.** The graph is now in hand, so a seed
-    nothing references by store path (a relocated, self-contained tree) can be
-    omitted from `resolved` (`from ⊋ paths` in the old prose). Not done — every
-    reachable node is currently kept.
+  - [x] **Follow-on: relocated-seed drop — CLOSED (moot).** A `Store`-era idea
+    (`from ⊋ paths`): drop a seed nothing references by store path from the bind
+    set. The sealed model dissolved it — `Store` is gone, so relocation is a
+    plain `Host` bind that contributes no seed and isn't in the closure at all
+    (never over-binds); overlay lowers are needed at their identity path; and
+    `root` is the only seed that *could* be unreferenced, but we deliberately
+    identity-bind it (`/nix/store/<self>`) for robustness. No current mount
+    produces a droppable seed — at most one bind (root's self-bind) could go, and
+    only by undoing that decision. Not worth doing.
   - [ ] **Follow-on: bake mountpoints from the same graph.** `bash-sandbox.nix`
     still uses `closureInfo { rootPaths = deps }` for the flat mkdir list (a
     separate build, pre-`root`). Could derive it from the deps' `references` JSON
