@@ -4,7 +4,7 @@
 
 A fast, Nix-native sandbox runtime that sits between `bubblewrap` and
 `docker`: it launches processes into strictly-namespaced environments in
-milliseconds, with synthetic system state and no escape hatches.
+milliseconds, with synthetic system state and no hidden escape hatches.
 
 ## The gap it fills
 
@@ -44,9 +44,13 @@ deliberately aspirational and only make sense once the spec/closure model
 1. **Fast cold start.** Launching a sandboxed process should be cheap enough
    that you reach for it reflexively for one-off commands. Target: low
    single-digit milliseconds of runtime overhead before `exec`.
-2. **Strict by default.** Read-only root, user-namespace + subuid/subgid
-   mapping always on, minimal mounts, synthetic system files. You opt *into*
-   exposure, never out of confinement.
+2. **Default-safe, not safe-only.** Read-only root, user-namespace +
+   subuid/subgid mapping, minimal mounts, and synthetic system files are the
+   *default* posture — the easy path is the safe path. You opt *into* exposure;
+   opting *out* of confinement is possible but never the default, never ambient,
+   and always recorded in the resolved spec. The boundary is a default, not a
+   cage — see [Design philosophy](#design-philosophy) and
+   [control-surface.md](control-surface.md).
 3. **Two run-modes** (`pierogi wrap` argv-first, `pierogi run <spec>` for a
    declared/prebuilt spec; `pierogi resolve` freezes a spec ahead of time — see
    [execution-modes.md](execution-modes.md)).
@@ -79,16 +83,30 @@ deliberately aspirational and only make sense once the spec/closure model
   meet that bar. The runtime is crun (libcrun), driven as an embedded library
   via FFI with its config passed in memory as a JSON string — no `config.json`
   — see [architecture.md](architecture.md).
-- **No "just bind-mount the host" escape hatches.** Exposing host `/etc`, host
-  `/home`, or the raw D-Bus socket defeats the purpose. Where exposure is
-  unavoidable it must be explicit, narrow, and visible in config — never a
-  blanket convenience flag.
+- **No *ambient* or *blanket* escape hatches.** Exposing host `/etc`, host
+  `/home`, or the raw D-Bus socket is *possible* — the engine is a pure realizer
+  and binds what a spec declares — but never as a default, never as a one-word
+  omnibus (`--privileged`-style), and never invisibly. Where exposure is wanted
+  it must be explicit, granular, and visible in the resolved spec. What we refuse
+  is not the *capability* to loosen but *unauditable* loosening — anything that
+  widens the boundary without appearing in the artifact (a `hooks.d`-style
+  ambient injection is the archetype). See [Design philosophy](#design-philosophy)
+  and [control-surface.md](control-surface.md).
 
 ## Design philosophy
 
 - **The point is the boundary.** Every feature is judged by whether it
-  *tightens* or *dissolves* the sandbox boundary. Convenience flags that
-  dissolve it don't ship.
+  *tightens* or *dissolves* the sandbox boundary. A one-word convenience that
+  dissolves it invisibly doesn't ship; a granular, explicit loosening that lands
+  in the resolved spec is fine — the user may shoot their own foot, but only
+  deliberately and on the record.
+- **Auditability is the load-bearing invariant.** The resolved spec is the
+  complete, honest record of what the sandbox sees and does — every loosening
+  included. This is what makes "you may opt out of confinement" acceptable: you
+  can always see exactly what was opened, because nothing widens the boundary
+  without being written down. Safe *defaults* are the bridge/producer's job (it
+  materializes them into the spec before the engine sees it); the engine stays a
+  pure realizer that neither invents nor conceals.
 - **Generate, don't borrow.** When a sandbox needs `/etc/passwd` or a hostname,
   synthesize a minimal correct version from declared identity. Borrowing host
   files leaks host state and creates surprising coupling.
@@ -98,7 +116,12 @@ deliberately aspirational and only make sense once the spec/closure model
   that can be diffed, reviewed, and reproduced — not a sequence of imperative
   mount commands.
 - **Composition over configuration.** Profiles (browser, gui-app, network-app)
-  are composable Nix modules, not a monolithic option set.
+  are composable Nix modules, not a monolithic option set. The Nix layer lets
+  *default policy itself be a library* — a profile encodes the minimum,
+  vetted exposure an app class needs, authored once and shared through the store,
+  rather than each user hand-rolling (and mis-rolling) it. Because a profile
+  evaluates to a resolved spec, the shared policy stays fully auditable — see
+  [control-surface.md](control-surface.md#the-producer-layer--where-defaults-and-shared-policy-live).
 
 ## Success looks like
 

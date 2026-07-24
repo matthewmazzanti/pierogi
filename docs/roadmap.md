@@ -214,7 +214,9 @@ audio, file dialogs work via portals — no raw host socket, no host `/etc`, no 
 ## M6 — Steam & the messy long tail  🎮
 
 The stress test. Steam wants a lot, behaves badly, and runs arbitrary downloaded
-code — the ideal adversary for the "no escape hatches" thesis.
+code — the ideal adversary for the auditable-boundary thesis (default-safe,
+every loosening explicit and on the record — see [vision.md](vision.md) and
+[control-surface.md](control-surface.md)).
 
 **Forces:** multi-process trees, 32-bit, broad GPU/controller device access,
 larger writable state, performance under load.

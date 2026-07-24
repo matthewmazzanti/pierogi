@@ -2,8 +2,8 @@
 
 A fast, Nix-native sandbox runtime — between `bubblewrap` and `docker`. See
 [`docs/`](docs/) for the [vision](docs/vision.md), [architecture](docs/architecture.md),
-[execution modes](docs/execution-modes.md), the [spec](docs/spec.md), and the
-[roadmap](docs/roadmap.md).
+[execution modes](docs/execution-modes.md), the [spec](docs/spec.md), the
+[control surface](docs/control-surface.md), and the [roadmap](docs/roadmap.md).
 
 ## What it does
 
@@ -66,5 +66,5 @@ csrc/shim.c     # Rust <-> libcrun bridge
 build.rs        # compiles + links the shim
 nix/            # bash-sandbox.nix — the sealed-rootfs build pipeline
 flake.nix .envrc# dev shell: rust toolchain + the harvested libcrun dev tree
-docs/           # vision / architecture / execution-modes / spec / roadmap
+docs/           # vision / architecture / execution-modes / spec / control-surface / roadmap
 ```

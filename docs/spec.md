@@ -17,6 +17,16 @@ materialized *into* the spec by the bridge before the engine sees it (see
 [execution-modes.md](execution-modes.md) — the four-layer pipeline). If a field
 is absent, it is absent — the engine adds nothing.
 
+A consequence worth stating outright: because the engine realizes exactly the
+spec and nothing more, **the resolved spec is the complete, auditable record** of
+the sandbox — every loosening (a host bind, an opened namespace, a dropped
+default) is visible in it or does not happen. This is what makes a default-safe
+posture compatible with letting a user opt *out* of confinement: the opt-out is
+representable, but never ambient — it lands in the artifact. How each control
+maps to the OCI runtime spec, which direction it moves the boundary, and how the
+surface is meant to grow are catalogued in
+[control-surface.md](control-surface.md).
+
 ## v0 schema
 
 Start on the core (`exec`, `root`, `mounts`, `env`) and expand per feature.
