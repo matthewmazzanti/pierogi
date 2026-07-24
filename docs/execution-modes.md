@@ -158,16 +158,19 @@ closure comes from **declared sources only**, and the exec target is *resolved
 against* that closure, never a source for it. There is no exe-derived closure —
 `argv[0]` is looked up in the container's `PATH`, not scanned.
 
-The closure's seeds are declared, and there are two kinds:
+The closure's seeds are a **build-time input** (`closure.seeds`): the producer
+that emits the spec declares them, and `resolve` walks the graph from them
+(rather than deriving them). Two kinds:
 
 1. **`root`** (required) → the rootfs *and* base closure seed, with `PATH` from
    its `bin` dirs. `argv[0]` is resolved **within** the closure and is an **error
    if absent** — exec never expands the closure (Docker semantics; maximally
    auditable). This holds in *every* mode; there is no exe-derived fallback and no
-   `root: absent` case.
+   `root: absent` case. `resolve` fails loud if the seeds' closure doesn't cover
+   `root`.
 2. **overlay lowers** → each overlay mount's store-path source is an additive
-   seed, dragging its own closure onto root's. `store_refs()` matches **only
-   `Overlay`**. The full mount taxonomy by closure contribution:
+   seed, dragging its own closure onto root's. The full mount taxonomy by closure
+   contribution:
 
 | Mount kind | Contributes a seed? |
 |---|---|
@@ -175,9 +178,10 @@ The closure's seeds are declared, and there are two kinds:
 | `Tmpfs` | no — writable scratch |
 | `Overlay` (store-path lower) | yes — its source is a seed |
 
-`seeds = root ∪ ⋃ overlay-lower sources`; `resolved` is the full closure of those
-seeds over the supplied graph, **including `root`**, canonically sorted. Nothing
-is inferred from the command line (see [Declared-only closure](#declared-only-closure-no-discovery)).
+The producer follows `seeds = root ∪ ⋃ overlay-lower sources`; `resolved`
+(stamped by `resolve`) is the full closure of those seeds over the supplied graph,
+**including `root`**, canonically sorted. Nothing is inferred from the command
+line (see [Declared-only closure](#declared-only-closure-no-discovery)).
 
 ## `closure` — the built store view
 

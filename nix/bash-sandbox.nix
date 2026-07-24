@@ -23,7 +23,8 @@
 #     │            │  (Nix expands the graph as JSON in $NIX_ATTRS_JSON_FILE)
 #     │            └─ pierogi traverses it from the spec's seeds → `resolved`
 #     │
-#     ├─ unresolved spec.json  (exec/root/mounts/env, no closure)
+#     ├─ unresolved spec.json  (root/executable/args/env/mounts + closure.seeds,
+#     │                          no closure.resolved)
 #     └─ pierogi resolve <spec> --graph $NIX_ATTRS_JSON_FILE  →  built spec.json
 #
 # Two different closure mechanisms, because baking and the spec-stamp have
@@ -126,26 +127,39 @@ let
     mkdir -p "$out/nix/store/$(basename "$out")"
   '';
 
-  # The sources spec: no `closure:` (resolve --graph stamps it). Internal
-  # input only — not runnable, since there is no live-query path.
-  unresolvedSpec = {
-    exec = {
-      executable = "bash";
-      args = [ "--norc" ];
-      terminal = true;
-    };
+  # The default-closed floor, as spec fields — the engine holds no policy, so
+  # the sandbox is hardened *because* it composes this (see nix/profiles.nix).
+  profiles = import ./profiles.nix { };
+
+  # The sources spec: `profiles.base` (the floor) merged with this sandbox's
+  # own fields. `closure.seeds` set (the build-time input), but no
+  # `closure.resolved` yet — `resolve --graph` stamps that. Internal input only,
+  # not runnable, since there is no live-query path.
+  #
+  # The process fields track docker-compose, flat: `executable`/`args` (execve),
+  # `tty`, `environment`. The rest are faithful OCI pass-throughs (from `base`).
+  # `root`/`closure` stay Nix-shaped. See `docs/spec.md`.
+  unresolvedSpec = pkgs.lib.recursiveUpdate profiles.base {
     root = "${root}";
+    executable = "bash";
+    args = [ "--norc" ];
+    tty = true;
+    # Writable scratch onto the baked /tmp mountpoint — a verbatim OCI mount
+    # (destination/type/options), producer-owned options and all.
     mounts = [
-      # Writable scratch, onto the baked /tmp mountpoint.
-      { type = "tmpfs"; dest = "/tmp"; }
+      { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
     ];
-    env = {
+    environment = {
       # /bin is root's own bin/, surfaced at /. `/nix/store/<root>/bin` would
       # work too now that root is identity-bound, but /bin is shorter.
       PATH = "/bin";
       HOME = "/home/pierogi";
       TERM = "xterm-256color";
     };
+    # Seeds: the store paths pierogi traverses the reference graph from. Here
+    # just `root` (its closure covers bash/coreutils/etc). A producer declares
+    # these; an overlay lower would be added alongside root.
+    closure.seeds = [ "${root}" ];
   };
   unresolvedSpecFile =
     pkgs.writeText "spec.unresolved.json" (builtins.toJSON unresolvedSpec);
@@ -157,10 +171,10 @@ in
   # [root]` makes Nix expand the full graph as the top-level `closure` array of
   # `$NIX_ATTRS_JSON_FILE` (the same shape `closureInfo` reads: one
   # `{ path, references, ... }` per closure member); pierogi ignores the rest of
-  # the attrs. `resolve` stamps
-  # `closure = { seeds = [root], resolved = closure(root) }`. Building this also
-  # realizes the rootfs and its whole closure into the store, so every bind the
-  # spec names is present.
+  # the attrs. The spec already carries `closure.seeds = [root]` (set above), so
+  # `resolve` traverses from those and stamps `closure.resolved = closure(root)`.
+  # Building this also realizes the rootfs and its whole closure into the store,
+  # so every bind the spec names is present.
   resolved = pkgs.runCommand "pierogi-bash-sandbox.json"
     {
       __structuredAttrs = true;

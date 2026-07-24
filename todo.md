@@ -30,8 +30,8 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   closure-filling entry.
 - [ ] **`Overlay` under the frozen-topology model.** Still deferred (`oci` bails).
   Its lower must be in `closure` and its `dest` baked; it's the last `Mount`
-  variant that names a store `source` (so the only `store_refs` contributor).
-  Revisit realization when it lands.
+  variant that names a store `source` (so the only kind a producer adds to
+  `closure.seeds` beyond `root`). Revisit realization when it lands.
 - [x] **Traverse the reference graph from `seeds` in-process.** `resolve --graph`
   takes Nix's `exportReferencesGraph` as JSON and walks requisites from `seeds`
   itself (`resolve::resolve_from_graph`): `resolved = closure(seeds)`, root

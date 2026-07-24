@@ -3,10 +3,21 @@
 After the de-risking spike (M0), milestones are ordered by **where the
 uncertainty and interest are**, not by a generic harden-first sequence. The novel
 integrations — nix-mode, the D-Bus proxy, GPU/Wayland — are the genuinely unknown
-surface and are pulled forward; the well-understood hardening work (strict
-defaults, seccomp) is deliberately deferred to a single later milestone. This
-**trades away** the "later targets inherit a hardened base" property on purpose —
-see [Sequencing rationale](#sequencing-rationale) for the consequences.
+surface and are pulled forward.
+
+**The engine holds no policy** (see [architecture.md](architecture.md)'s third
+principle and [control-surface.md](control-surface.md)): pierogi-the-binary is a
+*pure realizer* — a lightly-extended OCI runtime (runc's role) plus nix carve-outs
+— and it projects whatever the resolved spec carries, `absent = absent`. So
+"hardening" is **not an engine milestone**. The engine *supports* the full OCI
+surface (caps, seccomp, masks, mappings, devices, rlimits) as **pass-through** once
+[M1.5](#m15--engine-as-pure-realizer-passthrough--light-nix-mapping) lands; the
+**default-closed posture is `profiles.base`** in the Nix layer (podman's role), and
+what's genuinely deferred is only *producer curation*: the seccomp profile,
+subuid-range resolution, and `pierogi-synth` `/etc` ([M4](#m4--curated-policy-profilesbase-synth--seccomp-profile)). Two engine-adjacent
+mechanisms stay the engine's job because they're mechanism, not policy: it
+**supervises host-side sidecars** (the D-Bus filter proxy, [M2](#m2--d-bus-proxy-layer)) and accepts **CLI overrides** that inject
+runtime-only changes (a bind mount, an env var) as a runtime producer.
 
 Each milestone lists **acceptance criteria** (how we know it's done) and the
 **architecture it forces** (what must exist to get there). See
@@ -61,13 +72,14 @@ tail, the in-process closure traversal, the self-contained spec artifact.
 
 - [x] Typed `Spec` / `Mount` / `Closure` + `serde` (the v0 schema — see
       [spec.md](spec.md)), replacing M0's ad-hoc `SpecInputs`.
-- [x] `resolve()`: seeds = `root ∪ store_refs(mounts)` (`store_refs` matches only
-      `Overlay` lowers); no live query — traverse Nix's `exportReferencesGraph`
-      (JSON via `__structuredAttrs`) in-process from the seeds; stamp
-      `{seeds, resolved}`.
+- [x] `resolve()`: `closure.seeds` is a **build-time input** (producer declares
+      `root ∪ overlay lowers`); no live query — traverse Nix's
+      `exportReferencesGraph` (JSON via `__structuredAttrs`) in-process from the
+      seeds; stamp `closure.resolved` (fail loud if it doesn't cover `root`).
 - [x] Refactor `build_spec` to consume a **resolved** `Spec`: `closure.resolved`
       → identity binds, `mounts` → OCI mounts (`Host`/`Tmpfs`; `Overlay` after —
-      still stubbed), `env` → `process.env`, `exec` → argv.
+      still stubbed), `environment` → `process.env`, `executable`/`args` → argv
+      (flat compose-flavoured fields; `tty`/`working_dir`/`read_only` too).
 - [x] `pierogi run <spec.json>` — load, closure present ⇒ no query, realize,
       launch. `pierogi run <store-path>` is the *same* path: the nix-mode
       artifact is just a resolved spec file (see the builder item), so a store
@@ -93,8 +105,50 @@ tail, the in-process closure traversal, the self-contained spec artifact.
   — proving the baked-`/etc`-in-root path (synth automation is M4).
 
 **Deferred:** the `pierogi-synth` builders (M1 hand-rolls `/etc` in Nix instead),
-strict confinement + id mapping (1:1 as M0), seccomp, and the `wrap` argv
-front-end — all to M4.
+the curated closed defaults (`profiles.base`, M1.5/M4), subuid ranges + seccomp
+*profile* (M4), and the `wrap` argv front-end (M4).
+
+---
+
+## M1.5 — Engine as pure realizer (passthrough + light nix mapping)
+
+The pivot that makes everything after it cheap. **Reduce the engine to a faithful
+OCI projection + nix carve-outs, and move all policy up into Nix.** Once this
+lands, adding a control (caps, seccomp, devices, mappings) is a one-line
+pass-through field, not an engine feature — so the "hardening milestone" dissolves
+into a Nix profile.
+
+**Forces:** the schema as an OCI projection (`absent = absent`), an `oci.rs` that
+holds no defaults, and the first Nix policy library (`profiles.base`).
+
+- [ ] **Strip engine policy.** `oci.rs` stops hardcoding the namespace set, the
+      1:1 id map, and `root.readonly`; `spec.rs` drops the `read_only`/`hostname`
+      serde defaults. Neutralize `oci-spec`'s inherited `Process::default()` (nnp,
+      3 caps, nofile rlimit) — emit exactly what the spec carries, or nothing.
+- [ ] **Pass-through fields** (all `absent = absent`): `no_new_privileges`,
+      `capabilities` (`Some([])` = drop-all), `rlimits`, `masked_paths`,
+      `readonly_paths`, `rootfs_propagation`, `namespaces` (untagged: `"user"` |
+      `{type,path}`), `seccomp` and `devices` (reuse `oci-spec` types verbatim),
+      and `uid/gid_mappings` with a `host: N | "self"` sentinel the engine resolves
+      to `getuid()`/`getgid()` at launch.
+- [ ] **`mounts` carry explicit `options`** (drop `rw`); the `:rw`/`:ro` sugar
+      moves into the producers (CLI + Nix). Closure identity-binds keep implicit
+      `ro,nosuid,nodev` (mechanism constant — an immutable store never varies).
+- [ ] **`profiles.base` (Nix):** the curated default-closed floor as a composable
+      attrset (read-only root, nnp, caps `[]`, curated masks/readonly paths,
+      rprivate, `RLIMIT_CORE=0`, private namespaces incl. `network`, the
+      `self` 1:1 map). `bash-sandbox.nix` composes it and comes out hardened —
+      while the engine decided nothing.
+- [ ] **CLI overrides stay** (`--env`/`--mount`/argv/`--hostname`): a *runtime
+      producer* that injects runtime-only changes onto the resolved spec.
+- [ ] First `oci.rs` tests, incl. the regression guard: a minimal spec yields
+      **no** capabilities (proves the inherited 3-cap default is gone).
+
+**Acceptance:** `pierogi run` on a `base`-composed bash-sandbox launches a shell
+with empty caps, nnp, masked `/proc`, a private net ns, `nosuid,nodev` binds — and
+every one of those values is **visible in the resolved spec**, written by
+`profiles.base`, not by the engine. The same spec with `base` *not* composed runs
+open (the runc contract), also visibly.
 
 ---
 
@@ -118,8 +172,16 @@ of the spec, ready-synchronization before `exec`.
 explicit `talk` rule allows it; remove the rule and the call is denied at the
 proxy; the raw bus socket is never present in the sandbox.
 
-**Note:** runs on the M0/M1 crude (unhardened) base — this is a *mechanism* proof,
-re-validated under confinement at M4.
+**Pure-realizer framing:** the proxy is a **host-side sidecar** the engine
+*supervises* (spawn, wait-ready before `exec`, tear down with the sandbox) and
+whose filtered socket it binds in — that's **mechanism**, legitimately the
+engine's job, like the tty relay. The **filter policy is producer data**: `dbus`
+rules travel in the resolved spec and the engine translates them to proxy config
+without holding any default of its own (deny-all is a `profiles.base`/producer
+choice, not an engine one).
+
+**Note:** compose `profiles.base` for a confined run; without it this is a bare
+*mechanism* proof. Re-validated under the full curated policy at M4.
 
 ---
 
@@ -148,43 +210,49 @@ renders through the proxied compositor socket with no raw host socket and no hos
 
 ---
 
-## M4 — Hardening: synth, strict defaults & seccomp
+## M4 — Curated policy: `profiles.base`, synth & the seccomp profile
 
-The deferred security work, done in one pass now that the mechanisms (M1–M3)
-exist and have shaped the spec. Well-understood, so sequenced late on purpose —
-then applied *across* the earlier integrations, which get re-validated under it.
+Not "add hardening to the engine" — the engine already *supports* every knob as
+pass-through (M1.5). This milestone is the **producer-side curation** the
+pass-throughs were waiting for: fill `profiles.base` out to its final form, author
+the seccomp profile, resolve subuid ranges, and generate `/etc` — done in one pass
+now that the mechanisms (M1–M3) exist and have shaped what the profiles must carry,
+then re-validated across the earlier integrations.
 
-**Forces:** the `pierogi-synth` builders, strict-by-default wrap mode, the seccomp
-pipeline, the perf budget, the `wrap` argv front-end.
+**Forces:** the Nix profile library, the `pierogi-synth` builders, subuid-range
+resolution, the `wrap` argv front-end.
 
-- [ ] `pierogi-synth` crate: pure builders for `passwd`/`group`/`hostname`/
-      `hosts`/`resolv.conf`/`machine-id`/`nsswitch`, consuming the
-      synthetic-identity JSON slice (`serde`). Golden-tested. **Replaces M1/M2's
-      hand-rolled `/etc`** — the bridge from an identity attrset to real files
-      (streamlines authoring, and the same generator serves build *and* runtime).
-- [ ] `pierogi synth-etc <spec.json> <outdir>` (the build-time entrypoint; the
-      Nix builder from M1 starts calling it to bake `/etc`).
-- [ ] `pierogi wrap` argv front-end + baked base rootfs + `wrap --dry-run`
-      (prints the *unresolved* spec — never an OCI dump).
-- [ ] User namespace + uid/gid map from subuid/subgid ranges (OCI
-      `uidMappings`/`gidMappings`).
-- [ ] Read-only root, caps drop to empty + `noNewPrivileges`, UTS + IPC
-      namespaces; finalize pid-1/init strategy.
-- [ ] Default-deny seccomp profile + per-profile allowlist (OCI `linux.seccomp`;
-      custom `seccompiler`-style filter only if the schema can't express it).
-- [ ] Network namespace default-off; loopback-only mode.
+- [ ] **`pierogi-synth` crate:** pure builders for `passwd`/`group`/`hostname`/
+      `hosts`/`resolv.conf`/`machine-id`/`nsswitch` from the synthetic-identity
+      JSON slice (`serde`). Golden-tested. **Replaces M1/M2's hand-rolled `/etc`** —
+      the same generator serves build *and* runtime.
+- [ ] `pierogi synth-etc <spec.json> <outdir>` build-time entrypoint (the M1 Nix
+      builder starts calling it to bake `/etc`).
+- [ ] `pierogi wrap` argv front-end (a *runtime producer*) + baked base rootfs +
+      `wrap --dry-run` (prints the *resolved* spec — never a raw OCI dump).
+- [ ] **subuid/subgid range resolution:** read `/etc/subuid`, drive
+      `newuidmap`/`newgidmap`, and emit concrete `uid/gid_mappings` — the runtime
+      resolution the M1.5 `"self"` sentinel and numeric pass-through leave open.
+- [ ] **The curated seccomp *profile*** (deny-all default + allowlist) authored as
+      a `profiles.base` value the engine passes through — including per-app deltas
+      for the M2/M3 proxies. (Custom `seccompiler`-style only if the OCI schema
+      can't express it.)
+- [ ] **Finish `profiles.base`** (started in M1.5): pin the final mask list, cap
+      posture, rlimits, propagation, and the loopback-only `network` rung; profile
+      composition (`base ∘ network ∘ gui …`). Finalize pid-1/init strategy.
 - [ ] Perf pass: hit the single-digit-ms cold-start target; document overhead.
 - [ ] Threat-model doc; fuzz/round-trip the spec + synth-identity parsers.
-- [ ] **Re-validate M2/M3** under strict confinement + seccomp (allowlist what the
+- [ ] **Re-validate M2/M3** composing the full curated profiles (allowlist what the
       proxies / GPU access legitimately need).
 
 **Acceptance:**
-- `pierogi wrap -- bash` gives a confined shell: `id` shows the mapped uid;
-  `cat /etc/hostname` shows the synthetic name; `/` is read-only, `/tmp` writable;
-  host `/etc/passwd`/`/home`/`/proc/1` are **not** visible; `whoami` resolves via
-  synthetic `passwd`; runs under default-deny seccomp.
+- `pierogi wrap -- bash` (composing `profiles.base`) gives a confined shell: `id`
+  shows the mapped uid; `cat /etc/hostname` shows the synthetic name; `/` is
+  read-only, `/tmp` writable; host `/etc/passwd`/`/home`/`/proc/1` are **not**
+  visible; `whoami` resolves via synthetic `passwd`; runs under the deny-all
+  seccomp profile — and every value is visible in the resolved spec.
 - `pierogi synth-etc` produces correct `/etc` from an identity JSON.
-- The M2 D-Bus and M3 GPU/Wayland sandboxes still work under confinement.
+- The M2 D-Bus and M3 GPU/Wayland sandboxes still work composing the profiles.
 - Cold-start within budget, benchmarked; threat model written.
 
 ---
@@ -263,7 +331,9 @@ path M1 runs, and the emitted spec matches the hand-written equivalent.
 - **Performance budget.** Re-measure cold start each milestone; regressions are
   bugs. Target stays single-digit ms of engine overhead.
 - **Threat model.** Living doc; updated whenever a milestone adds surface area.
-  Note: M1–M3 predate strict confinement — track them as *unhardened until M4*.
+  Note: M1–M3 run on a *partially*-curated `profiles.base` — track them as
+  *lightly-hardened until the M4 profiles are authored* (the engine surface is
+  complete at M1.5; what's missing is the curated policy values).
 - **Testing.** Synth-builder golden tests + spec/translation tests + namespace
   integration tests (VM/CI sandbox) + proxy policy tests.
 - **Docs.** Keep `vision`/`architecture`/`roadmap`/`spec` honest as reality
@@ -286,13 +356,22 @@ is **interest-and-uncertainty-driven**, a deliberate departure from harden-first
   is where the real unknowns live. Building them early also lets them **shape the
   spec's `dbus`/device/socket surface against real clients** rather than guesses
   (the M7-is-last philosophy, one level down).
-- **Hardening (M4) is deferred on purpose.** Strict confinement and seccomp are
-  well-understood, so they buy little as *proofs* — better to land them once, over
-  proven mechanisms, and re-validate the earlier integrations under them.
-- **The cost, accepted consciously:** M1–M3 run on a crude base (hand-rolled
-  `/etc`, no strict confinement or seccomp), so they are *mechanism spikes, not
-  shippable-secure*. "Browser launches" ≠ "browser is confined" until M4. (D-Bus
-  needs `/etc/machine-id`, but that's just another hand-written file in M1's root
-  `/etc` — no synth pulled forward.)
+- **The engine is reduced to a pure realizer early (M1.5)**, because that's what
+  makes the rest cheap: once the engine holds no policy and passes the full OCI
+  surface through, every later control is a one-line field, and "hardening" stops
+  being engine work.
+- **Curation (M4) is deferred on purpose.** The floor *values* — the seccomp
+  profile, subuid resolution, the final `profiles.base`, synth `/etc` — are
+  well-understood, so they buy little as *proofs*. Better to author them once, in
+  Nix, over proven mechanisms, and re-validate the earlier integrations composing
+  them. Note this is *producer* work; the engine's support for the knobs already
+  exists from M1.5.
+- **The cost, accepted consciously:** M1–M3 are demonstrated on a *lightly*-curated
+  base (hand-rolled `/etc`, a partial `profiles.base`, no seccomp profile yet), so
+  they are *mechanism spikes, not shippable-secure*. "Browser launches" ≠ "browser
+  is confined" until the M4 profiles are authored — but the gap is now a matter of
+  *composing a richer profile*, not of engine changes. (D-Bus needs
+  `/etc/machine-id`, but that's just another hand-written file in M1's root `/etc`
+  — no synth pulled forward.)
 - **The config/module layer (M7) is still last and open** — convenience over a
   mechanism that already works, shaped by what M1–M6 actually needed.

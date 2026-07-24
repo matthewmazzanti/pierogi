@@ -8,28 +8,42 @@
 
 ## The model in one screen
 
-The engine is a **pure realizer**: it binds what the resolved spec says and
-`exec`s (see [spec.md](spec.md#what-the-spec-is)). So the "control surface" is the
-set of things a *producer* (the bridge, a Nix module, a hand-authored spec) can
-put into a spec, and this doc is the map from each to its OCI realization.
+> **This doc maps the *producer* layer, not the engine.** The engine
+> (pierogi-the-binary) is a **pure realizer** — a lightly-extended OCI runtime
+> (runc's role) plus nix carve-outs (sealed rootfs, closure binds). It holds
+> **zero policy**: it faithfully projects whatever the resolved spec says into the
+> OCI spec and `exec`s, `absent = absent`. Every default, every floor value, every
+> OPEN is written into the spec by a **producer** *before* the engine sees it
+> (podman's role, here played by the Nix builder). So "the control surface" is
+> what a producer can put in a spec, and this doc is the map from each control to
+> its OCI realization — a spec for the **Nix profile layer**, not a description of
+> engine behavior.
 
 Three load-bearing ideas govern the whole surface:
 
-1. **Sealed base.** The default state is the most-closed reasonable sandbox —
-   read-only root, private namespaces, dropped caps, default-deny seccomp, masked
-   `/proc`, `nosuid,nodev` binds. Nothing in a bare spec loosens this.
-2. **Directionality from the base.** Because the base is already closed, every
-   *lever* points one of two ways: **NEUTRAL** (describe the workload — doesn't
-   move the boundary) or **OPEN** (loosen — move the boundary outward from the
-   base). There are essentially **no CLOSE levers**, because there is nothing left
-   to close: the floor is already the floor. This is the exact inverse of
-   docker/podman, whose base is *open* and whose flags mostly CLOSE (or, via
-   `--privileged`, blow the base wide). See [Directionality](#directionality).
-3. **Auditability is the invariant.** Every OPEN lands in the resolved spec. A
-   user may open anything — bind `/`, join the host net namespace, drop seccomp —
-   but only *deliberately* and *on the record*. What is refused is not the
-   capability to loosen, but loosening that never appears in the artifact. See
-   [Refused surface](#refused-surface).
+1. **The sealed base is a *composed profile*, not an engine default.** The
+   most-closed reasonable sandbox — read-only root, private namespaces, dropped
+   caps, default-deny seccomp, masked `/proc`, `nosuid,nodev` binds — is
+   `profiles.base` in the Nix layer, and it applies *because a producer composed
+   it*, not because the engine imposes it. A genuinely bare spec (no profile) is
+   **not** sealed — it's whatever the OCI runtime does with the fields present.
+   Safety is one `import` away, vetted once, recorded in the artifact — never
+   ambient in the engine. This is where curated defaults live, so masking /
+   network / resources can each get bespoke defaults instead of one uniform floor.
+2. **Directionality from the base.** Relative to `profiles.base`, every *lever*
+   points one of two ways: **NEUTRAL** (describe the workload — doesn't move the
+   boundary) or **OPEN** (loosen — move the boundary outward from the base). There
+   are essentially **no CLOSE levers**, because the base is already the floor. This
+   is the exact inverse of docker/podman, whose base is *open* and whose flags
+   mostly CLOSE. (The exceptions — masking, network, resources — are catalogued in
+   [How to expand](#how-to-expand); they refine, not break, this.) See
+   [Directionality](#directionality).
+3. **Auditability is the invariant.** Every default *and* every OPEN lands in the
+   resolved spec — the floor is *in* the artifact (a producer wrote it), not applied
+   invisibly by the engine. A user may open anything — bind `/`, join the host net
+   namespace, drop seccomp — but only *deliberately* and *on the record*. What is
+   refused is not the capability to loosen, but loosening that never appears in the
+   artifact. See [Refused surface](#refused-surface).
 
 ## Directionality
 
@@ -37,8 +51,8 @@ Classify every control by how it moves the boundary relative to the sealed base:
 
 | Direction | Meaning | Examples |
 |---|---|---|
-| **NEUTRAL** | Describes *what runs / who it is / what it sees by placement*; boundary unchanged | `env`, `cwd`, `user`, `hostname`, `exec`, `args`, `terminal` |
-| **OPEN** | Loosens outward from the base; opt-in, explicit, recorded | a `Host` bind, a `--device`, `net: host`, `cap-add`, `readonly: false`, `seccomp: none` |
+| **NEUTRAL** | Describes *what runs / who it is / what it sees by placement*; boundary unchanged | `environment`, `working_dir`, `user`, `hostname`, `executable`, `args`, `tty` |
+| **OPEN** | Loosens outward from the base; opt-in, explicit, recorded | a `Host` bind, a `--device`, `net: host`, `cap-add`, `read_only: false`, `seccomp: none` |
 | **CLOSE** | Tightens below the base | *(empty — the base is the floor; see below)* |
 
 The empty CLOSE column is the whole point. In docker the useful security work is
@@ -110,37 +124,82 @@ accidentally bake policy where a library should provide it.
 
 ## Mapping: pierogi control → OCI realization
 
-### Descriptive fields (NEUTRAL, FIELD) — steal verbatim
+### Descriptive fields (NEUTRAL, FIELD) — steal the compose vocabulary
 
-The docker meaning is already correct; these carry no confinement semantics.
+The compose meaning is already correct; these carry no confinement semantics. The
+spec is laid out **flat**, like a single compose service — no `exec {}` grouping.
+Argv is the one deliberate divergence: it stays **execve** (one `executable` +
+`args`), not compose's ENTRYPOINT/CMD split.
 
-| Pierogi control | OCI field | Status |
-|---|---|---|
-| `exec.executable` / `args` | `process.args` | done (`oci.rs`) |
-| `exec.terminal` | `process.terminal` + devpts mount | done |
-| `env` | `process.env` | done |
-| `hostname` | `hostname` | done |
-| `exec.cwd` *(new)* | `process.cwd` | **gap** — hardcoded `/` today; trivial `Option<PathBuf>` |
-| identity (uid/gid, groups) | `process.user.{uid,gid,additionalGids,umask}` | partial — uid/gid only (M4 synth) |
+| Pierogi control | Compose | OCI field | Status |
+|---|---|---|---|
+| `executable` / `args` | ~`command` (execve, not entrypoint/command) | `process.args` | done (`oci.rs`) |
+| `tty` | `tty` | `process.terminal` + devpts mount | done |
+| `environment` | `environment` | `process.env` | done |
+| `hostname` | `hostname` | `hostname` | done |
+| `working_dir` | `working_dir` | `process.cwd` | done — `Option<PathBuf>`, absent → `/` |
+| identity (`user`) | `user` | `process.user.{uid,gid,additionalGids,umask}` | partial — host uid/gid only (M4 synth) |
 
-### The sealed base (FLOOR) — applied, not levered
+### The sealed base (FLOOR) — a composed profile, not an engine default
 
-The base's OCI realization. Each row is **on by default**; the "OPEN override"
-column is the *only* control, and it is always recorded.
+The OCI realization of `profiles.base`. Each row is **on when a producer composes
+`base`** (not applied by the engine); the value lands in the resolved spec, and
+the "OPEN override" column is how a producer relaxes it. The "Today" column is the
+current *field/pass-through* status in `oci.rs` — the values themselves come from
+the producer, `absent = absent`.
+
+All engine support is **pass-through as of M1.5** — the values below come from
+`profiles.base`, not the engine. "Curated in `base`" = the field exists and the
+base sets the floor value; the *curated content* (the seccomp profile, subuid
+ranges) is the M4 producer work.
 
 | Floor property | OCI field | Today | OPEN override |
 |---|---|---|---|
-| Read-only root | `root.readonly: true` | done (hardcoded) | `readonly: false` |
-| Private namespaces | `linux.namespaces` (user/mount/pid/uts/ipc) | done | per-ns OPEN (below) |
-| Masked `/proc`, `/sys` bits | `linux.maskedPaths` | **missing** | `unmask` list |
-| Read-only `/proc` bits | `linux.readonlyPaths` | **missing** | — |
-| No new privileges | `process.noNewPrivileges: true` | **missing** | rarely; explicit |
-| Caps dropped | `process.capabilities` = ∅ | **missing** (M4) | `cap-add` list |
-| Default-deny seccomp | `linux.seccomp` | **missing** (M4) | `seccomp: none` / profile |
-| `nosuid,nodev` on binds | mount `options` | **missing** | per-mount opt-out |
-| No core dumps | `RLIMIT_CORE = 0` | **missing** | explicit rlimit |
-| Private mount propagation | `linux.rootfsPropagation: rprivate` | **missing** | — |
-| cgroup namespace | `linux.namespaces` cgroup | **missing** | `cgroupns: host` |
+| Read-only root | `root.readonly` | pass-through; `base` sets `true` | `read_only: false` |
+| Private namespaces | `linux.namespaces` | pass-through; `base` sets the set | omit a ns / join via `path` |
+| Masked `/proc`, `/sys` bits | `linux.maskedPaths` | pass-through; `base` sets runc's list | `unmask` list (see note) |
+| Read-only `/proc` bits | `linux.readonlyPaths` | pass-through; `base` sets the list | — (see note) |
+| No new privileges | `process.noNewPrivileges` | pass-through; `base` sets `true` | rarely; explicit |
+| Caps dropped | `process.capabilities` = ∅ | pass-through; `base` sets `[]` | `cap_add` list |
+| Default-deny seccomp | `linux.seccomp` | pass-through; profile curated in **M4** | `seccomp: none` / profile (see note) |
+| `nosuid,nodev` on mounts | mount `options` | producer-set (CLI/`base`); closure binds implicit | per-mount (producer) |
+| No core dumps | `RLIMIT_CORE = 0` | pass-through; `base` sets it | explicit rlimit |
+| Private mount propagation | `linux.rootfsPropagation` | pass-through; `base` sets `rprivate` | — |
+| cgroup namespace | `linux.namespaces` cgroup | pass-through; not in `base` yet | `cgroupns: host` |
+
+> **TODO — masking doesn't fit the FLOOR shape; treat it separately (shortly).**
+> `maskedPaths`/`readonlyPaths` are the two rows above that are *not* clean floors.
+> The other floor items have a bounded/binary bottom (RO is binary; caps floor at
+> ∅; seccomp at deny-all), so "base = the maximum-closed state, only OPEN levers"
+> holds. Masking's target space is **unbounded**, and "mask everything" is both
+> inexpressible and useless — so any default is a *curated list* (a policy), not a
+> mechanical maximum, and `unmask` inverts against an arbitrary choice.
+>
+> The resolution: masking is **not a floor** but the *narrowing parameter of an
+> exposure*. The real floor for `/proc` is "not mounted"; we take an OPEN (mount
+> it, apps need it), and the mask list is how far we narrow that opening back down.
+> So it's a curated-default FIELD that is legitimately **bidirectional**: `unmask`
+> widens (OPEN, away from floor), `mask` narrows *toward* the floor (allowed —
+> re-closing an exposure, never below the floor; "mask all of `/proc`" converges on
+> "don't mount it"). Grammar when we build it: a vetted baseline (runc's list —
+> `/proc/kcore`, `/proc/keys`, `/sys/firmware`, `/sys/devices/virtual/powercap`, …)
+> as the engine default, with `unmask`/`mask` **deltas** against it rather than a
+> single overridable list (a full override silently drops `kcore` masking — a
+> foot-gun). This refines, not breaks, the directionality thesis: the "base =
+> mechanical maximum" claim holds only for bounded controls; unbounded list-valued
+> exposures are "narrow-able," and add-from-∅ exposures (`mounts`, `devices`) are
+> OPEN-only. Two shapes; fold this in when masking lands.
+
+> **TODO — seccomp is masking's bounded cousin; treat carefully (M4).** The
+> *mechanism* floors cleanly at deny-all — but "deny all" can't even `exit()`, so
+> any usable default is a **curated allowlist** (the runc/Docker ~300-syscall
+> profile). So, like masking, its default is a *policy, not a mechanical maximum*.
+> The difference that makes it tractable: the syscall universe is **bounded**, so
+> `seccomp: none`, profile-select, and allow-deltas are all expressible cleanly
+> (masking's list has no such ceiling). Open calls when it lands: ship runc's
+> profile verbatim vs. author our own (the same "track vs. freeze" sync question as
+> masking), and how architecture-specific syscall tables are handled. Deferred to
+> M4 with caps/identity; pinned here so the shape is on the record.
 
 ### Exposure fields (OPEN, FIELD) — steal, narrow the grammar
 
@@ -148,17 +207,20 @@ Representable, off by default, explicit, recorded. The grammar admits the
 foot-gun values (`host`, arbitrary ns path) — pierogi does not paternalize — but
 they are never the default and always land in the spec.
 
+All are **pass-through fields** (M1.5) — engine support exists; what's noted as
+M3/M4 is the *producer curation* (which device, which subuid range, the profile).
+
 | Pierogi control | OCI field | Notes |
 |---|---|---|
-| `Mount::Host { source, dest, rw }` | `mounts` (bind) | `source` may be `/` — the engine won't refuse it; the bridge just never defaults to it |
-| `Mount::Tmpfs` | `mounts` (tmpfs) | done |
-| `Mount::Overlay` | `mounts` (overlay) | deferred (`oci.rs` bails) |
-| idmapped mount | `mounts[].uidMappings/gidMappings` | **new** — the clean answer to host-owned project/profile dirs under a subuid range (M4/M5) |
-| device | `linux.devices` (+ bind in rootless) | **new** — narrow `/dev/dri/renderD128`, controllers (M3). *Not* a `--gpus all` omnibus |
-| network | `linux.namespaces` network + `path` | **new** — default off; grammar: `none` \| loopback \| proxied ns \| `host` \| `ns:<path>` (M4) |
-| join namespace | `linux.namespaces[].path` | **new** — any `/proc/<pid>/ns/*`, incl. host; explicit only |
-| id mapping | `linux.{uid,gid}Mappings` | 1:1 today → subuid ranges (M4) |
-| seccomp profile select | `linux.seccomp` | choose allowlist; `none` is an OPEN override of the floor |
+| bind mount | `mounts` (verbatim `oci_spec::Mount`, `type: bind`) | `source` may be `/` — the engine won't refuse it; a producer just never defaults to it |
+| tmpfs | `mounts` (`type: tmpfs`) | done |
+| overlay | `mounts` (`type: overlay`) | verbatim OCI mount; realization is crun's (rootless overlayfs/fuse) |
+| idmapped mount | `mounts[].uidMappings/gidMappings` | free with verbatim mounts — the clean answer to host-owned dirs under a subuid range (M4/M5) |
+| device | `linux.devices` (rootless binds the node) | pass-through; narrow `/dev/dri/renderD128`, controllers (curation M3). *Not* a `--gpus all` omnibus |
+| network | `linux.namespaces` network + `path` | pass-through; grammar `none` \| join a `pasta`/`slirp` netns via `path` \| `host` (curation M4) |
+| join namespace | `linux.namespaces[].path` | pass-through; any `/proc/<pid>/ns/*`, incl. host; explicit only |
+| id mapping | `linux.{uid,gid}Mappings` | pass-through; `host: "self"` (invoker) today → subuid ranges (M4) |
+| seccomp profile select | `linux.seccomp` | pass-through (verbatim OCI); `none` is an OPEN, the curated profile is M4 |
 
 ### Resource controls (OPEN-ish, FIELD) — the conditional ones
 
@@ -197,29 +259,30 @@ rootless) · `intelRdt`, `blockIO`, `hugepageLimits`, `rdma`, `resources.network
 see `src/tty.rs`), `scheduler`/`ioPriority`, `personality` (except `LINUX32` as an M6
 Steam companion), `unified` cgroup-v2 passthrough, Windows/Solaris/vm/zos.
 
-## Open decision — who applies the floor when the spec is silent?
+## DECIDED — the producer writes the floor; the engine holds no policy
 
-The reconciliation sharpens one fork. Given default-safe + foot-shootable + pure
-realizer, **when a spec omits a floor field, does the engine apply the safe
-value, or realize the absence?**
+**When a spec omits a floor field, the engine realizes the absence** — `absent =
+absent`. It never applies a safe value of its own. The floor is written into the
+spec by a producer (`profiles.base`) before the engine sees it, so the resolved
+spec is the *complete, honest record* and the engine stays a true realizer. This
+is the **bridge-writes-the-floor / runc model**, chosen over engine-defaults for
+three reasons that the design surfaced:
 
-- **Bridge-only (pure engine).** Engine realizes literally; `absent = absent`
-  (spec.md's existing commitment). The bridge always writes the floor, so the
-  resolved spec is the *complete* record. A raw hand-authored spec without seccomp
-  gets none — visibly (the field is absent), power-user territory.
-- **Engine-defaults (defense-in-depth).** Engine applies the floor when silent,
-  spec can override. A forgotten field stays safe — but the engine now holds
-  policy, and the resolved spec is no longer the whole story.
+- **The floor can't be uniform anyway.** Masking, network, and resources have no
+  clean mechanical bottom (see [How to expand](#how-to-expand)), so an
+  engine-applied floor could never be *correct* across them. Curated per-domain
+  defaults only make sense in a profile.
+- **A finishable engine.** A pure OCI+nix realizer has a bounded surface; a
+  policy-embedding engine grows forever. Policy churn belongs in Nix, where
+  iteration is cheap.
+- **Auditability is stronger, not weaker.** The floor lands *in* the artifact
+  (a producer wrote every value) rather than being applied invisibly.
 
-Today's `oci.rs` is *neither cleanly*: it hardcodes `root.readonly(true)` and the
-namespace set (engine-defaults) but emits no masks/seccomp/caps at all. The
-decision resolves that inconsistency.
-
-**Recommendation:** bridge-writes-the-floor, engine stops hardcoding (even
-`readonly`). It keeps the engine a true realizer and makes the resolved spec the
-complete, honest audit surface — which is the invariant everything else here
-leans on. The cost (a hand-authored spec that omits the floor is unhardened) is
-acceptable *because it is visible*. **Status: OPEN — owner's call.**
+The cost — a genuinely bare, profile-less spec is unhardened — is the runc
+contract, and acceptable *because it is visible* and one `import profiles.base`
+away. Consequence for `oci.rs`: it stops hardcoding anything (the namespace set,
+the 1:1 mapping, `readonly`), and every OCI knob becomes a faithful pass-through
+of a spec field, emitting nothing when the field is absent. **Status: DECIDED.**
 
 ## How to expand
 

@@ -3,11 +3,12 @@
 //! Two entry points, both spec-in (no ad-hoc `wrap`/exe bridge — that path was
 //! rolled back once nix-mode build-time resolution became the way in):
 //! * [`run_spec`] — the `run` verb: load a `spec.json`, apply CLI overrides,
-//!   launch. The spec must already carry its `closure:` (there is no runtime
-//!   query — pierogi is pre-bake only).
+//!   launch. The spec must already carry its built `closure.resolved` (there is
+//!   no runtime query — pierogi is pre-bake only).
 //! * [`resolve_cmd`] — the `resolve` verb: load, traverse a supplied `--graph`
-//!   (build-time; Nix's `exportReferencesGraph` JSON) from the spec's seeds,
-//!   print the built spec. This is the sole path that fills a closure.
+//!   (build-time; Nix's `exportReferencesGraph` JSON) from the spec's
+//!   `closure.seeds`, print the built spec. This is the sole path that stamps
+//!   `closure.resolved`.
 
 use std::path::{Path, PathBuf};
 
@@ -49,16 +50,16 @@ pub fn resolve_cmd(spec_path: PathBuf, graph_file: PathBuf) -> Result<()> {
 
 /// The mode-agnostic tail: assert built → realize → drive crun → clean up.
 fn launch(spec: Spec) -> Result<()> {
-    // Assert the spec is pre-baked (carries `closure:`). There is no runtime
-    // query. The exec target is resolved by the runtime against the container's
-    // PATH at launch (in-sandbox), not here.
+    // Assert the spec is pre-baked (carries `closure.resolved`). There is no
+    // runtime query. The exec target is resolved by the runtime against the
+    // container's PATH at launch (in-sandbox), not here.
     resolve(&spec)?;
 
-    let closure = spec.closure.as_ref().expect("asserted above");
+    let resolved = spec.closure.resolved.as_ref().expect("asserted above");
     eprintln!(
         "pierogi: sealed rootfs {} + {} closure binds",
         spec.root,
-        closure.resolved.len()
+        resolved.len()
     );
 
     let uid = unsafe { libc::getuid() };
@@ -84,7 +85,7 @@ fn launch(spec: Spec) -> Result<()> {
     // A `terminal:true` spec needs a controlling tty: bind a console socket and
     // start the relay *before* the backend runs, so the runtime can connect and
     // hand us the pty master as it starts the container.
-    let relay = if spec.exec.terminal {
+    let relay = if spec.tty {
         Some(ConsoleRelay::bind(work.join("console.sock"))?)
     } else {
         None

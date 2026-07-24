@@ -37,8 +37,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run a sandbox from a **pre-baked** spec: `pierogi run <spec.json>`. The
-    /// spec must carry its `closure:` — there is no runtime Nix query. Build one
-    /// first with `pierogi resolve … --graph` (or a Nix builder).
+    /// spec must carry its built `closure.resolved` — there is no runtime Nix
+    /// query. Build one first with `pierogi resolve … --graph` (or a Nix builder).
     ///
     /// CLI overrides overlay onto the loaded spec before it runs (the `run`
     /// bridge): env, hostname, argv, and additive host/tmpfs mounts — all
@@ -68,16 +68,16 @@ enum Cmd {
         argv: Vec<String>,
     },
 
-    /// Build a spec: traverse the reference graph from the spec's seeds and
-    /// stamp the resulting `closure:`, then print the frozen spec. No live
-    /// `nix-store` query — the graph is supplied. Driven by the Nix builder that
-    /// emits the spec (via `exportReferencesGraph`).
+    /// Build a spec: traverse the reference graph from the spec's
+    /// `closure.seeds` and stamp the resulting `closure.resolved`, then print the
+    /// frozen spec. No live `nix-store` query — the graph is supplied. Driven by
+    /// the Nix builder that emits the spec (via `exportReferencesGraph`).
     Resolve {
         /// Path to a pierogi `spec.json`.
         spec: PathBuf,
 
         /// A Nix `exportReferencesGraph` dump of the seeds' reference graph.
-        /// pierogi traverses it from the spec's seeds. Required.
+        /// pierogi traverses it from the spec's `closure.seeds`. Required.
         #[arg(long)]
         graph: PathBuf,
     },

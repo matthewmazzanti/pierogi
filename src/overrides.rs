@@ -4,12 +4,12 @@
 //! Supported overrides: `--env`, `--hostname`, an argv override (trailing
 //! `-- cmd args`), and additive **host / tmpfs** mounts.
 //!
-//! * `env` / `hostname` / argv rewrite spec fields in place.
-//! * host / tmpfs mounts contribute nothing to `resolve()`'s seeds
-//!   (`Mount::store_refs` is `None` for both), so they layer on without a query
-//!   and without tripping a sealed spec's drift check. Their dest mountpoints
-//!   must already exist in the sealed `root` — a runtime mount can bind onto a
-//!   baked mountpoint but cannot create one under the read-only rootfs.
+//! * `environment` / `hostname` / argv rewrite spec fields in place.
+//! * host / tmpfs mounts are never closure seeds (only an `Overlay` lower is),
+//!   so they layer on without a query and without tripping a sealed spec's drift
+//!   check. Their dest mountpoints must already exist in the sealed `root` — a
+//!   runtime mount can bind onto a baked mountpoint but cannot create one under
+//!   the read-only rootfs.
 //!
 //! **No `--mount store:`.** Adding a store path at runtime would need a fresh
 //! `/nix/store/<hash>` mountpoint the sealed `root` never baked, so the closure
@@ -20,20 +20,23 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
+use oci_spec::runtime::{Mount as OciMount, MountBuilder};
 
-use crate::spec::{Mount, Spec};
+use crate::spec::Spec;
 
 /// Parsed CLI overrides for the `run` verb.
 #[derive(Debug, Default)]
 pub struct Overrides {
-    /// `--env KEY=VALUE` pairs, applied over `spec.env` (insert / overwrite).
+    /// `--env KEY=VALUE` pairs, applied over `spec.environment` (insert /
+    /// overwrite).
     env: Vec<(String, String)>,
     /// `--hostname NAME`, replacing `spec.hostname`.
     hostname: Option<String>,
-    /// `--mount …` additive host / tmpfs / store mounts, appended to
-    /// `spec.mounts`.
-    mounts: Vec<Mount>,
-    /// Trailing `-- cmd args…` overriding `spec.exec` (empty = no override).
+    /// `--mount …` additive host / tmpfs mounts (verbatim OCI mounts), appended
+    /// to `spec.mounts`.
+    mounts: Vec<OciMount>,
+    /// Trailing `-- cmd args…` overriding `spec.executable` + `spec.args` (empty
+    /// = no override).
     argv: Vec<String>,
 }
 
@@ -69,24 +72,23 @@ impl Overrides {
     }
 
     /// Overlay the overrides onto `spec`. This rewrites spec *fields* only and
-    /// never touches `spec.closure` directly — but it is applied *before*
-    /// `resolve()`, which is where the consequences land: the argv override's
-    /// new executable is validated against the closure, and a store mount adds a
-    /// seed that `resolve()` folds in live (unsealed) or delta-recomputes,
-    /// breaking the seal (sealed).
+    /// never touches `spec.closure` — the closure is sealed at build time, and
+    /// host / tmpfs mounts contribute no seed, so a `run` override can't change
+    /// the store view. The argv override's new executable is still validated
+    /// against the resolved closure by the runtime at launch (in-sandbox).
     pub fn apply(self, spec: &mut Spec) {
         for (k, v) in self.env {
-            spec.env.insert(k, v);
+            spec.environment.insert(k, v);
         }
         if let Some(hostname) = self.hostname {
-            spec.hostname = hostname;
+            spec.hostname = Some(hostname);
         }
         spec.mounts.extend(self.mounts);
         if !self.argv.is_empty() {
             let mut it = self.argv.into_iter();
             // Non-empty checked above, so `next()` yields the executable.
-            spec.exec.executable = it.next().expect("argv non-empty");
-            spec.exec.args = it.collect();
+            spec.executable = it.next().expect("argv non-empty");
+            spec.args = it.collect();
         }
     }
 }
@@ -110,30 +112,37 @@ fn parse_env(s: &str) -> Result<(String, String)> {
 /// and `overlay:…` are rejected: a store path added at runtime would need a
 /// `/nix/store/<hash>` mountpoint the image never baked (the closure is frozen
 /// at build time), and overlay realization is deferred within M1.
-fn parse_mount(s: &str) -> Result<Mount> {
+fn parse_mount(s: &str) -> Result<OciMount> {
     let (kind, rest) = s
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("--mount expects KIND:…, got `{s}`"))?;
     match kind {
         "tmpfs" => {
             let dest = abs_dest(rest, s)?;
-            Ok(Mount::Tmpfs { dest })
+            // The CLI is a producer: it bakes hardened tmpfs options in.
+            Ok(MountBuilder::default()
+                .destination(dest)
+                .typ("tmpfs".to_string())
+                .options(opts(["nosuid", "nodev", "mode=1777"]))
+                .build()?)
         }
         "host" => {
             let parts: Vec<&str> = rest.split(':').collect();
-            let (src, dest, rw) = match parts.as_slice() {
-                [src, dest] | [src, dest, "ro"] => (*src, *dest, false),
-                [src, dest, "rw"] => (*src, *dest, true),
+            let (src, dest, access) = match parts.as_slice() {
+                [src, dest] | [src, dest, "ro"] => (*src, *dest, "ro"),
+                [src, dest, "rw"] => (*src, *dest, "rw"),
                 _ => bail!("--mount host expects host:SRC:DEST[:rw|:ro], got `{s}`"),
             };
             if src.is_empty() {
                 bail!("--mount host has an empty source: `{s}`");
             }
-            Ok(Mount::Host {
-                source: PathBuf::from(src),
-                dest: abs_dest(dest, s)?,
-                rw,
-            })
+            // Expand the ro/rw sugar into explicit, hardened bind options.
+            Ok(MountBuilder::default()
+                .destination(abs_dest(dest, s)?)
+                .source(PathBuf::from(src))
+                .typ("bind".to_string())
+                .options(opts(["bind", access, "nosuid", "nodev"]))
+                .build()?)
         }
         "store" => bail!(
             "--mount store:… is not supported: the closure is sealed at build \
@@ -147,6 +156,11 @@ fn parse_mount(s: &str) -> Result<Mount> {
             bail!("--mount has unknown kind `{other}` (expected host or tmpfs): `{s}`")
         }
     }
+}
+
+/// Collect a fixed set of option strings into a `Vec<String>`.
+fn opts<const N: usize>(o: [&str; N]) -> Vec<String> {
+    o.iter().map(|s| s.to_string()).collect()
 }
 
 /// Validate a mount destination is a non-empty absolute path.
@@ -163,21 +177,32 @@ fn abs_dest(dest: &str, whole: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{Exec, StorePath};
+    use crate::spec::{Closure, StorePath};
     use std::collections::BTreeMap;
 
     fn spec() -> Spec {
         Spec {
-            exec: Exec {
-                executable: "bash".into(),
-                args: vec!["-l".into()],
-                terminal: false,
-            },
+            executable: "bash".into(),
+            args: vec!["-l".into()],
+            tty: false,
+            working_dir: None,
+            hostname: None,
             root: StorePath::new("/nix/store/aaaa-root").unwrap(),
             mounts: vec![],
-            env: BTreeMap::from([("PATH".into(), "/nix/store/aaaa-root/bin".into())]),
-            hostname: "pierogi".into(),
-            closure: None,
+            environment: BTreeMap::from([("PATH".into(), "/nix/store/aaaa-root/bin".into())]),
+            read_only: None,
+            no_new_privileges: None,
+            capabilities: None,
+            rlimits: vec![],
+            masked_paths: vec![],
+            readonly_paths: vec![],
+            rootfs_propagation: None,
+            namespaces: vec![],
+            uid_mappings: vec![],
+            gid_mappings: vec![],
+            seccomp: None,
+            devices: vec![],
+            closure: Closure::default(),
         }
     }
 
@@ -192,10 +217,10 @@ mod tests {
         .unwrap();
         let mut s = spec();
         o.apply(&mut s);
-        assert_eq!(s.env.get("FOO").unwrap(), "bar");
-        assert_eq!(s.env.get("PATH").unwrap(), "/override");
-        assert_eq!(s.env.get("EMPTY").unwrap(), "");
-        assert!(s.closure.is_none());
+        assert_eq!(s.environment.get("FOO").unwrap(), "bar");
+        assert_eq!(s.environment.get("PATH").unwrap(), "/override");
+        assert_eq!(s.environment.get("EMPTY").unwrap(), "");
+        assert!(s.closure.resolved.is_none());
     }
 
     #[test]
@@ -216,7 +241,7 @@ mod tests {
         let o = Overrides::parse(vec![], Some("devbox".into()), vec![], vec![]).unwrap();
         let mut s = spec();
         o.apply(&mut s);
-        assert_eq!(s.hostname, "devbox");
+        assert_eq!(s.hostname.as_deref(), Some("devbox"));
     }
 
     #[test]
@@ -230,10 +255,10 @@ mod tests {
         .unwrap();
         let mut s = spec();
         o.apply(&mut s);
-        assert_eq!(s.exec.executable, "rg");
-        assert_eq!(s.exec.args, vec!["foo", "--color"]);
-        // terminal is untouched by an argv override.
-        assert!(!s.exec.terminal);
+        assert_eq!(s.executable, "rg");
+        assert_eq!(s.args, vec!["foo", "--color"]);
+        // tty is untouched by an argv override.
+        assert!(!s.tty);
     }
 
     #[test]
@@ -241,8 +266,8 @@ mod tests {
         let o = Overrides::default();
         let mut s = spec();
         o.apply(&mut s);
-        assert_eq!(s.exec.executable, "bash");
-        assert_eq!(s.exec.args, vec!["-l"]);
+        assert_eq!(s.executable, "bash");
+        assert_eq!(s.args, vec!["-l"]);
     }
 
     #[test]
@@ -261,27 +286,28 @@ mod tests {
         let mut s = spec();
         o.apply(&mut s);
         assert_eq!(s.mounts.len(), 3);
-        match &s.mounts[0] {
-            Mount::Host { rw, .. } => assert!(!rw),
-            _ => panic!("expected host"),
-        }
-        match &s.mounts[2] {
-            Mount::Host { source, dest, rw } => {
-                assert_eq!(source, &PathBuf::from("/c"));
-                assert_eq!(dest, &PathBuf::from("/c"));
-                assert!(rw);
-            }
-            _ => panic!("expected host"),
-        }
+        // ro default → bind,ro,nosuid,nodev.
+        let m0 = &s.mounts[0];
+        let o0 = m0.options().as_ref().unwrap();
+        assert!(o0.contains(&"ro".to_string()));
+        assert!(o0.contains(&"nosuid".to_string()));
+        // explicit rw → a bind mount, bind,rw,nosuid,nodev.
+        let m2 = &s.mounts[2];
+        assert_eq!(m2.source().as_ref().unwrap(), &PathBuf::from("/c"));
+        assert_eq!(m2.destination(), &PathBuf::from("/c"));
+        assert_eq!(m2.typ().as_deref(), Some("bind"));
+        assert_eq!(
+            m2.options().as_ref().unwrap(),
+            &["bind", "rw", "nosuid", "nodev"]
+        );
     }
 
     #[test]
     fn tmpfs_mount() {
         let m = parse_mount("tmpfs:/scratch").unwrap();
-        match m {
-            Mount::Tmpfs { dest } => assert_eq!(dest, PathBuf::from("/scratch")),
-            _ => panic!("expected tmpfs"),
-        }
+        assert_eq!(m.destination(), &PathBuf::from("/scratch"));
+        assert_eq!(m.typ().as_deref(), Some("tmpfs"));
+        assert!(m.options().as_ref().unwrap().contains(&"nosuid".to_string()));
     }
 
     #[test]

@@ -1,11 +1,12 @@
-//! `resolve` — attach (or assert) a **built** closure on a spec.
+//! `resolve` — stamp (or assert) the **built** closure on a spec.
 //!
-//! There is no live `nix-store` query: pierogi leans fully into pre-baking. At
-//! build time [`resolve_from_graph`] takes Nix's `exportReferencesGraph` (the
-//! reference graph of the seeds, as JSON), **traverses it from the spec's seeds
-//! ourselves**, and stamps the resulting closure in. At run time a spec must
-//! already carry its `closure`; [`resolve`] only asserts that, it never computes
-//! one.
+//! There is no live `nix-store` query: pierogi leans fully into pre-baking. The
+//! spec's `closure.seeds` is a **build-time input** — the store paths to
+//! traverse *from*. At build time [`resolve_from_graph`] takes Nix's
+//! `exportReferencesGraph` (the reference graph of those seeds, as JSON),
+//! **traverses it from `closure.seeds` ourselves**, and stamps the resulting
+//! `closure.resolved` in. At run time a spec must already carry its
+//! `closure.resolved`; [`resolve`] only asserts that, it never computes one.
 //!
 //! The graph is delivered as the `closure` array of a `__structuredAttrs` JSON
 //! file (`$NIX_ATTRS_JSON_FILE`) — the same shape `closureInfo` consumes: one
@@ -26,20 +27,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::spec::{Closure, Spec, StorePath};
+use crate::spec::{Spec, StorePath};
 
-/// The declared seeds of a spec: `root` plus every overlay-lower source. Used
-/// only to stamp `closure.seeds` (provenance) — not to drive a query.
-fn seeds(spec: &Spec) -> Vec<StorePath> {
-    let mut seeds = vec![spec.root.clone()];
-    seeds.extend(spec.mounts.iter().filter_map(|m| m.store_refs().cloned()));
-    seeds
-}
-
-/// Assert `spec` carries a built `closure`. With the live query removed, an
-/// unbuilt spec cannot be resolved at run time — pre-bake it first.
+/// Assert `spec` carries a built closure (`closure.resolved`). With the live
+/// query removed, an unbuilt spec cannot be resolved at run time — pre-bake it.
 pub fn resolve(spec: &Spec) -> Result<()> {
-    if spec.closure.is_none() {
+    if spec.closure.resolved.is_none() {
         bail!(
             "spec has no built closure; pre-bake it with \
              `pierogi resolve <spec> --graph <reference-graph>` before running"
@@ -48,18 +41,30 @@ pub fn resolve(spec: &Spec) -> Result<()> {
     Ok(())
 }
 
-/// Build a spec's `closure` by traversing Nix's `exportReferencesGraph` JSON
-/// from the spec's seeds (the build-time / `resolve --graph` entry). `seeds` is
-/// the declared seeds (root + overlay lowers); `resolved` is the closure of
-/// those seeds over the graph, canonically sorted.
+/// Stamp a spec's `closure.resolved` by traversing Nix's `exportReferencesGraph`
+/// JSON from the spec's **build-time** `closure.seeds` (the `resolve --graph`
+/// entry). `resolved` is the closure of those seeds over the graph, canonically
+/// sorted. Fails loud if the seeds are empty or their closure doesn't cover
+/// `root` (which is both the `/` mount and an identity bind, so it must be in).
 pub fn resolve_from_graph(spec: &mut Spec, graph_json: &str) -> Result<()> {
-    if spec.closure.is_some() {
-        bail!("spec already carries a closure; refusing to overwrite");
+    if spec.closure.resolved.is_some() {
+        bail!("spec already carries a built closure (`closure.resolved`); refusing to overwrite");
+    }
+    if spec.closure.seeds.is_empty() {
+        bail!(
+            "spec declares no `closure.seeds`; the build must set them \
+             (conventionally root plus any overlay lowers) before resolve"
+        );
     }
     let graph = parse_reference_graph(graph_json)?;
-    let seeds = seeds(spec);
-    let resolved = closure_of(&graph, &seeds)?;
-    spec.closure = Some(Closure { seeds, resolved });
+    let resolved = closure_of(&graph, &spec.closure.seeds)?;
+    if !resolved.contains(&spec.root) {
+        bail!(
+            "the seeds' closure does not cover root {}; add it to `closure.seeds`",
+            spec.root
+        );
+    }
+    spec.closure.resolved = Some(resolved);
     Ok(())
 }
 
@@ -128,49 +133,40 @@ fn closure_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{Exec, Mount};
+    use crate::spec::Closure;
     use std::collections::BTreeMap;
 
-    fn spec_with(root: &str, mounts: Vec<Mount>) -> Spec {
+    /// Build an unbuilt spec seeded from `root` (the common case). Tests that need
+    /// other seeds set `spec.closure.seeds` directly — it's a producer-declared
+    /// input, not something the engine derives.
+    fn spec_with(root: &str) -> Spec {
+        let root = StorePath::new(root).unwrap();
         Spec {
-            exec: Exec {
-                executable: "bash".into(),
-                args: vec![],
-                terminal: false,
+            executable: "bash".into(),
+            args: vec![],
+            tty: false,
+            working_dir: None,
+            hostname: None,
+            closure: Closure {
+                seeds: vec![root.clone()],
+                resolved: None,
             },
-            root: StorePath::new(root).unwrap(),
-            mounts,
-            env: BTreeMap::new(),
-            hostname: "pierogi".into(),
-            closure: None,
+            root,
+            mounts: vec![],
+            environment: BTreeMap::new(),
+            read_only: None,
+            no_new_privileges: None,
+            capabilities: None,
+            rlimits: vec![],
+            masked_paths: vec![],
+            readonly_paths: vec![],
+            rootfs_propagation: None,
+            namespaces: vec![],
+            uid_mappings: vec![],
+            gid_mappings: vec![],
+            seccomp: None,
+            devices: vec![],
         }
-    }
-
-    #[test]
-    fn seeds_are_root_plus_overlay_sources() {
-        let spec = spec_with(
-            "/nix/store/aaaa-root",
-            vec![
-                Mount::Host {
-                    source: "/etc/resolv.conf".into(),
-                    dest: "/etc/resolv.conf".into(),
-                    rw: false,
-                },
-                Mount::Tmpfs {
-                    dest: "/tmp".into(),
-                },
-                Mount::Overlay {
-                    source: StorePath::new("/nix/store/cccc-proj").unwrap(),
-                    dest: "/work".into(),
-                    upper: None,
-                },
-            ],
-        );
-        let s = seeds(&spec);
-        // root + overlay source; host/tmpfs contribute nothing.
-        assert_eq!(s.len(), 2);
-        assert_eq!(s[0].to_string(), "/nix/store/aaaa-root");
-        assert_eq!(s[1].to_string(), "/nix/store/cccc-proj");
     }
 
     // A three-node reference graph (exportReferencesGraph JSON shape): root ->
@@ -184,11 +180,11 @@ mod tests {
 
     #[test]
     fn resolve_from_graph_traverses_closure_from_seeds_sorted() {
-        let mut spec = spec_with("/nix/store/aaaa-root", vec![]);
+        let mut spec = spec_with("/nix/store/aaaa-root");
         resolve_from_graph(&mut spec, GRAPH).unwrap();
-        let c = spec.closure.as_ref().unwrap();
-        assert_eq!(c.seeds.len(), 1); // just root
-        let as_str: Vec<String> = c.resolved.iter().map(|p| p.to_string()).collect();
+        assert_eq!(spec.closure.seeds.len(), 1); // just root
+        let resolved = spec.closure.resolved.as_ref().unwrap();
+        let as_str: Vec<String> = resolved.iter().map(|p| p.to_string()).collect();
         // Full closure of root, canonically sorted.
         assert_eq!(
             as_str,
@@ -210,13 +206,13 @@ mod tests {
             { "path": "/nix/store/cccc-leaf", "references": [] },
             { "path": "/nix/store/zzzz-orphan", "references": [] }
         ] }"#;
-        let mut spec = spec_with("/nix/store/cccc-leaf", vec![]);
+        let mut spec = spec_with("/nix/store/cccc-leaf");
         resolve_from_graph(&mut spec, graph).unwrap();
         let as_str: Vec<String> = spec
             .closure
+            .resolved
             .as_ref()
             .unwrap()
-            .resolved
             .iter()
             .map(|p| p.to_string())
             .collect();
@@ -225,29 +221,38 @@ mod tests {
 
     #[test]
     fn resolve_from_graph_bails_when_a_seed_is_absent_from_the_graph() {
-        let mut spec = spec_with("/nix/store/zzzz-absent", vec![]);
+        let mut spec = spec_with("/nix/store/zzzz-absent");
         assert!(resolve_from_graph(&mut spec, GRAPH).is_err());
     }
 
     #[test]
-    fn resolve_from_graph_refuses_to_overwrite_a_present_closure() {
-        let mut spec = spec_with("/nix/store/aaaa-root", vec![]);
-        spec.closure = Some(Closure {
-            seeds: vec![StorePath::new("/nix/store/aaaa-root").unwrap()],
-            resolved: vec![StorePath::new("/nix/store/aaaa-root").unwrap()],
-        });
+    fn resolve_from_graph_refuses_to_overwrite_a_built_closure() {
+        let mut spec = spec_with("/nix/store/aaaa-root");
+        spec.closure.resolved = Some(vec![StorePath::new("/nix/store/aaaa-root").unwrap()]);
         assert!(resolve_from_graph(&mut spec, GRAPH).is_err());
     }
 
     #[test]
-    fn resolve_ok_when_present_bails_when_absent() {
-        let mut spec = spec_with("/nix/store/aaaa-root", vec![]);
-        // Unbuilt: no runtime query to fall back on, so it must fail loud.
+    fn resolve_from_graph_bails_when_seeds_dont_cover_root() {
+        // Seeds reach only `cccc-leaf`, but root is `aaaa-root` — not covered.
+        let mut spec = spec_with("/nix/store/aaaa-root");
+        spec.closure.seeds = vec![StorePath::new("/nix/store/cccc-leaf").unwrap()];
+        assert!(resolve_from_graph(&mut spec, GRAPH).is_err());
+    }
+
+    #[test]
+    fn resolve_from_graph_bails_on_empty_seeds() {
+        let mut spec = spec_with("/nix/store/aaaa-root");
+        spec.closure.seeds.clear();
+        assert!(resolve_from_graph(&mut spec, GRAPH).is_err());
+    }
+
+    #[test]
+    fn resolve_ok_when_built_bails_when_unbuilt() {
+        let mut spec = spec_with("/nix/store/aaaa-root");
+        // Unbuilt (no `resolved`): no runtime query to fall back on — fail loud.
         assert!(resolve(&spec).is_err());
-        spec.closure = Some(Closure {
-            seeds: vec![],
-            resolved: vec![StorePath::new("/nix/store/aaaa-root").unwrap()],
-        });
+        spec.closure.resolved = Some(vec![StorePath::new("/nix/store/aaaa-root").unwrap()]);
         assert!(resolve(&spec).is_ok());
     }
 }

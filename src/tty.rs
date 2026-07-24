@@ -1,4 +1,4 @@
-//! Host-side terminal relay for `exec.terminal = true` sandboxes.
+//! Host-side terminal relay for `tty = true` sandboxes.
 //!
 //! We drive the OCI **console-socket** protocol ourselves — crun takes a
 //! console-socket *path*, nothing more. The flow:

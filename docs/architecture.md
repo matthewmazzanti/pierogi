@@ -80,6 +80,24 @@ exec-a-CLI path costs the startup we're trying to save. Pierogi's value-add is
 everything *around* the mechanics: the strict-by-default front-ends, synthetic
 system state, the proxy layers, and the Nix integration.
 
+**Third principle: the engine holds no policy — it is runc, the Nix builder is
+podman.** The security posture (which caps, which masks, the seccomp profile, the
+id-mapping, the default-closed floor) is **not** in pierogi-the-binary. The engine
+is a *pure realizer*: a lightly-extended OCI runtime (runc's role) plus nix
+carve-outs (sealed rootfs, closure identity-binds, overlay/relocation). It
+faithfully projects whatever the resolved spec carries into the OCI spec and
+`exec`s — `absent = absent`, no default applied. All policy, defaults, and
+curation live one level **up**, in the Nix producer layer (`mkSandbox` /
+`profiles.base`, podman's role), which composes a fully-resolved spec. Two
+payoffs: the engine has a **bounded, finishable** surface (the OCI spec is finite)
+while policy churns cheaply in Nix; and the resolved spec is the **complete,
+auditable record**, because every floor value was written by a producer and is
+visible in the artifact rather than applied invisibly by the engine. The
+consequence for the schema and `oci.rs`: OCI knobs (caps, masks, rlimits,
+namespaces, mappings, `noNewPrivileges`, propagation) are **pass-through fields**,
+not engine behavior. See
+[control-surface.md](control-surface.md#decided--the-producer-writes-the-floor-the-engine-holds-no-policy).
+
 ## Language & crates
 
 Rust. Core dependencies (candidates):
@@ -400,6 +418,10 @@ it isolated is what keeps the core auditable.
   launched sandbox, which hands off to the runtime and supervises only proxies.
 - No Nix evaluation (that's the front-end's job; the Engine never shells to
   `nix`).
+- **No policy or defaults.** The engine applies no floor, no default caps/masks/
+  seccomp, no id-mapping of its own — it projects exactly what the resolved spec
+  carries (`absent = absent`). The default-closed posture is `profiles.base` in the
+  Nix layer, not engine behavior (see the third principle above).
 - No host-state borrowing as a convenience.
 
 ## Open questions
