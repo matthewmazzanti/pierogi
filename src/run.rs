@@ -24,7 +24,7 @@ use crate::tty::ConsoleRelay;
 /// overrides, and launch.
 pub fn run_spec(spec_path: PathBuf, overrides: Overrides) -> Result<()> {
     let mut spec = load_spec(&spec_path)?;
-    // Overlay CLI overrides (env / hostname / argv / host-tmpfs mounts). None of
+    // Overlay CLI overrides (env / hostname / args / host-tmpfs mounts). None of
     // these touch the closure — it's sealed at build time — so they layer on
     // without a query or a re-resolve.
     if !overrides.is_empty() {

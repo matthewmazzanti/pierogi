@@ -64,10 +64,28 @@ let
     pierogi
   '';
 
+  # Minimal system bashrc — nixpkgs bash is built with SYS_BASHRC = /etc/bashrc,
+  # so an interactive (non-`--norc`) shell sources this before ~/.bashrc. Just a
+  # prompt and a couple of aliases; the sealed rootfs carries no other rc files.
+  etcBashrc = pkgs.writeText "bashrc" ''
+    # pierogi bash sandbox — minimal interactive rc.
+    # Colored prompt: green label, blue cwd. `\[..\]` wraps non-printing bytes so
+    # bash keeps its line-length accounting correct.
+    PS1='\[\e[1;32m\][pierogi]\[\e[0m\] \[\e[1;34m\]\w\[\e[0m\] \$ '
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+    alias ll='ls -la'
+    alias l='ls -CF'
+  '';
+
+  # The minimal-but-usable terminal userland (shell, coreutils, pager, text
+  # tools, tree, ncurses+terminfo) — shared with the foot sandbox.
+  terminalTools = import ./terminal-tools.nix { inherit pkgs; };
+
   # The runtime deps — root's references. `root` itself is NOT here: it doesn't
   # exist yet, and seeding from it would be circular. These are all buildable
   # before `root`, so they drive the baked dep-mountpoint tree.
-  deps = [ pkgs.bash pkgs.coreutils etcPasswd etcGroup etcHostname ];
+  deps = terminalTools ++ [ etcPasswd etcGroup etcHostname etcBashrc ];
 
   # The supplied closure of the deps — for baking dep mountpoints only.
   depsClosure = pkgs.closureInfo { rootPaths = deps; };
@@ -80,7 +98,7 @@ let
     # /bin symlink farm (buildEnv-style, but we need the same derivation to bake
     # mountpoints, so it's hand-rolled). Absolute targets into /nix/store, which
     # resolve inside the sandbox because the closure is bound there.
-    for pkg in ${pkgs.bash} ${pkgs.coreutils}; do
+    for pkg in ${pkgs.lib.concatMapStringsSep " " (p: "${p}") terminalTools}; do
       for f in "$pkg"/bin/*; do
         ln -sf "$f" "$out/bin/$(basename "$f")"
       done
@@ -93,6 +111,9 @@ let
     ln -s ${etcPasswd}   $out/etc/passwd
     ln -s ${etcGroup}    $out/etc/group
     ln -s ${etcHostname} $out/etc/hostname
+    ln -s ${etcBashrc}   $out/etc/bashrc
+    # The terminfo DB, so TERM (xterm-256color) resolves for less/clear/tput/etc.
+    ln -s ${pkgs.ncurses}/share/terminfo $out/etc/terminfo
 
     # Baked mountpoints — the skeleton the runtime mounts onto. Directories only;
     # the runtime overlays proc/tmpfs/binds here at launch. A read-only rootfs
@@ -143,14 +164,20 @@ let
     root.path = "${root}";
     process = {
       executable = "bash";
-      args = [ "--norc" ];
+      # No `--norc`: an interactive shell sources /etc/bashrc (baked above).
+      args = [ ];
       terminal = true;
+      # Start in /root — the persistent host dir the wrapper binds there. HOME
+      # points there too, so shell history / dotfiles survive the container.
+      cwd = "/root";
       env = {
         # /bin is root's own bin/, surfaced at /. `/nix/store/<root>/bin` would
         # work too now that root is identity-bound, but /bin is shorter.
         PATH = "/bin";
-        HOME = "/home/pierogi";
+        HOME = "/root";
         TERM = "xterm-256color";
+        TERMINFO = "/etc/terminfo";
+        LANG = "C.UTF-8";
       };
     };
     # Writable scratch onto the baked /tmp mountpoint — a verbatim OCI mount
@@ -166,8 +193,6 @@ let
   unresolvedSpecFile =
     pkgs.writeText "spec.unresolved.json" (builtins.toJSON unresolvedSpec);
 
-in
-{
   # Build: hand pierogi the reference graph of `root` and let it traverse from
   # the spec's seeds. `__structuredAttrs` + `exportReferencesGraph.closure =
   # [root]` makes Nix expand the full graph as the top-level `closure` array of
@@ -184,5 +209,34 @@ in
     } ''
     ${pierogi}/bin/pierogi resolve ${unresolvedSpecFile} \
       --graph "$NIX_ATTRS_JSON_FILE" > "''${outputs[out]}"
+  '';
+
+in
+{
+  # The built spec (closure stamped in). Internal: the input the runner execs
+  # against, and the artifact `bench.sh` / `resolve --graph` inspection consume.
+  inherit resolved;
+
+  # The runnable artifact — a wrapper that execs `pierogi run` against the built
+  # spec and hands the script's own argv to **bash** inside the sandbox. `"$@"`
+  # sits after `--`, so it becomes clap's `last = true` args override — which now
+  # replaces `process.args` *only*, keeping the spec's sealed `bash` executable.
+  # So `nix run .#bash-sandbox -- -c 'echo hello'` runs `bash -c 'echo hello'`,
+  # and a bare `nix run .#bash-sandbox` (empty `$@`) leaves the spec's args as-is
+  # and launches the default interactive bash (sourcing /etc/bashrc). The closure
+  # is sealed into `resolved` at build time; the wrapper adds no policy of its own.
+  runnable = pkgs.writeShellScriptBin "pierogi-bash-sandbox" ''
+    set -eu
+
+    # Persistent state: a local (gitignored) dir bound to /root — the sandbox's
+    # cwd + HOME. Anything written there survives the container. Defaults under
+    # the invocation dir (the repo's gitignored `state/`); override with
+    # $PIEROGI_STATE.
+    state="''${PIEROGI_STATE:-$PWD/state/bash-sandbox}"
+    mkdir -p "$state"
+
+    exec ${pierogi}/bin/pierogi run ${resolved} \
+      --mount "host:$state:/root:rw" \
+      -- "$@"
   '';
 }

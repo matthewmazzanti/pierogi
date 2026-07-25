@@ -254,7 +254,7 @@ rewrite, never a recompute.**
 | Override | Effect |
 |---|---|
 | `--env`, `--hostname` | rewrite spec field |
-| argv (trailing `-- cmd args`) | rewrite exec — resolved **within** the closure (Docker-within-root), else **error** |
+| args (trailing `-- args`) | rewrite `process.args` only — the executable is the spec's, sealed by the image |
 | `--mount host:SRC:DEST`, `--mount tmpfs:DEST` | layer on — dest must be a baked mountpoint in the sealed `root` |
 
 There is **no `--mount store:`** and no closure recompute: a different closure

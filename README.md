@@ -24,10 +24,21 @@ in-process. The OCI spec is handed to it as an in-memory JSON string — no
 ```sh
 nix develop            # or: direnv allow  (.envrc is `use flake`)
 
-# Build a self-contained, pre-baked sandbox spec (a static bash + coreutils
-# rootfs with the closure stamped in), then run it:
-nix build .#bash-sandbox
+# Build & run a self-contained, pre-baked sandbox (a static bash + coreutils
+# rootfs with the closure stamped in). `.#bash-sandbox` is a wrapper that execs
+# `pierogi run` against the built spec and hands its argv to bash in the sandbox:
+nix run .#bash-sandbox                       # interactive bash (sources /etc/bashrc)
+nix run .#bash-sandbox -- -c 'echo hello'    # args go straight to bash
+
+# Or build just the spec and run it with your own pierogi (full run overrides
+# like --env / --mount live here):
+nix build .#bash-sandbox-spec
 cargo run -- run ./result
+
+# A second example: route the host Wayland socket into the sandbox and run
+# `wayland-info` against your live compositor (needs a Wayland session). The
+# wrapper binds $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY onto a baked socket mountpoint.
+nix run .#wayland-sandbox
 ```
 
 Inside, you get a shell whose filesystem is the sealed rootfs at `/` plus its
@@ -39,8 +50,9 @@ closure under `/nix/store` and a writable tmpfs `/tmp`, `/dev`, and `/proc`.
 - **`pierogi run <spec.json>`** — run a **pre-baked** spec. The spec must already
   carry its `closure:` (there is no runtime Nix query); `run` on an unbuilt spec
   fails loud. CLI overrides (`--env`, `--hostname`, `--mount host:…|tmpfs:…`, and
-  a trailing `-- cmd args`) overlay onto the loaded spec, but the closure is
-  frozen — there is no `--mount store:`.
+  a trailing `-- args` that replaces the process args) overlay onto the loaded
+  spec, but the executable and closure are frozen — no `--mount store:`, and the
+  image's entrypoint executable is sealed (only its args vary).
 - **`pierogi resolve <spec.json> --graph <graph>`** — build a spec: traverse
   Nix's `exportReferencesGraph` (supplied as JSON) from the spec's seeds, stamp
   the resulting closure, and print the frozen spec. This is what a Nix builder

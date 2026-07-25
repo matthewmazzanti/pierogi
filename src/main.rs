@@ -41,8 +41,9 @@ enum Cmd {
     /// query. Build one first with `pierogi resolve … --graph` (or a Nix builder).
     ///
     /// CLI overrides overlay onto the loaded spec before it runs (the `run`
-    /// bridge): env, hostname, argv, and additive host/tmpfs mounts — all
-    /// runtime-only. The closure is sealed at build time, so there is no
+    /// bridge): env, hostname, process args, and additive host/tmpfs mounts —
+    /// all runtime-only. The executable is not overridable (the image seals the
+    /// entrypoint). The closure is sealed at build time, so there is no
     /// `--mount store:`: a different closure means a different image.
     Run {
         /// Override/insert an env var (repeatable): `--env KEY=VALUE`.
@@ -62,9 +63,9 @@ enum Cmd {
         /// Path to a pierogi `spec.json`.
         spec: PathBuf,
 
-        /// Override the exec: everything after `--` becomes the argv (the first
-        /// element is the executable, resolved within the spec's closure).
-        #[arg(last = true, value_name = "CMD")]
+        /// Override the process args: everything after `--` replaces the spec's
+        /// `process.args`. The executable stays the spec's — sealed by the image.
+        #[arg(last = true, value_name = "ARG")]
         argv: Vec<String>,
     },
 

@@ -28,7 +28,7 @@ BIN=$PWD/target/release/pierogi
 
 # The pre-baked sealed spec (rootfs + stamped closure). Built via Nix, which
 # realizes the whole rootfs closure into the store so every bind is present.
-SEALED=$(nix build .#bash-sandbox --no-link --print-out-paths)
+SEALED=$(nix build .#bash-sandbox-spec --no-link --print-out-paths)
 
 # Bench a non-interactive `true`: flip the baked spec's exec to a trivial,
 # no-terminal target so the timed loop is pure sandbox setup/teardown (no tty

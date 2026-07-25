@@ -1,10 +1,12 @@
 //! CLI overrides layered onto a loaded spec — the `run` bridge (see
 //! `docs/execution-modes.md#run-overrides--rewrites-and-when-they-recompute`).
 //!
-//! Supported overrides: `--env`, `--hostname`, an argv override (trailing
-//! `-- cmd args`), and additive **host / tmpfs** mounts.
+//! Supported overrides: `--env`, `--hostname`, an args override (trailing
+//! `-- args`), and additive **host / tmpfs** mounts.
 //!
-//! * `env` / `hostname` / argv rewrite spec fields in place.
+//! * `env` / `hostname` / args rewrite spec fields in place. The args override
+//!   replaces `process.args` only — the **executable stays the spec's**, sealed
+//!   by the image (the entrypoint is fixed; only its arguments vary).
 //! * host / tmpfs mounts are never closure seeds (only an `Overlay` lower is),
 //!   so they layer on without a query and without tripping a sealed spec's drift
 //!   check. Their dest mountpoints must already exist in the sealed `root` — a
@@ -35,9 +37,9 @@ pub struct Overrides {
     /// `--mount …` additive host / tmpfs mounts (verbatim OCI mounts), appended
     /// to `spec.mounts`.
     mounts: Vec<OciMount>,
-    /// Trailing `-- cmd args…` overriding `spec.process.executable` + `.args` (empty
-    /// = no override).
-    argv: Vec<String>,
+    /// Trailing `-- args…` overriding `spec.process.args` only — the executable
+    /// stays the spec's (sealed by the image). Empty = no override.
+    args: Vec<String>,
 }
 
 impl Overrides {
@@ -48,7 +50,7 @@ impl Overrides {
         env: Vec<String>,
         hostname: Option<String>,
         mount: Vec<String>,
-        argv: Vec<String>,
+        args: Vec<String>,
     ) -> Result<Self> {
         let env = env.iter().map(|s| parse_env(s)).collect::<Result<_>>()?;
         let mounts = mount
@@ -59,7 +61,7 @@ impl Overrides {
             env,
             hostname,
             mounts,
-            argv,
+            args,
         })
     }
 
@@ -68,14 +70,14 @@ impl Overrides {
         self.env.is_empty()
             && self.hostname.is_none()
             && self.mounts.is_empty()
-            && self.argv.is_empty()
+            && self.args.is_empty()
     }
 
     /// Overlay the overrides onto `spec`. This rewrites spec *fields* only and
     /// never touches `spec.closure` — the closure is sealed at build time, and
     /// host / tmpfs mounts contribute no seed, so a `run` override can't change
-    /// the store view. The argv override's new executable is still validated
-    /// against the resolved closure by the runtime at launch (in-sandbox).
+    /// the store view. The args override replaces `process.args` only; the
+    /// executable is the spec's, fixed by the image (a sealed entrypoint).
     pub fn apply(self, spec: &mut Spec) {
         for (k, v) in self.env {
             spec.process.env.insert(k, v);
@@ -84,11 +86,8 @@ impl Overrides {
             spec.hostname = Some(hostname);
         }
         spec.mounts.extend(self.mounts);
-        if !self.argv.is_empty() {
-            let mut it = self.argv.into_iter();
-            // Non-empty checked above, so `next()` yields the executable.
-            spec.process.executable = it.next().expect("argv non-empty");
-            spec.process.args = it.collect();
+        if !self.args.is_empty() {
+            spec.process.args = self.args;
         }
     }
 }
@@ -246,24 +245,25 @@ mod tests {
     }
 
     #[test]
-    fn argv_override_rewrites_exec_and_args() {
+    fn args_override_rewrites_args_only() {
         let o = Overrides::parse(
             vec![],
             None,
             vec![],
-            vec!["rg".into(), "foo".into(), "--color".into()],
+            vec!["-c".into(), "echo hi".into()],
         )
         .unwrap();
         let mut s = spec();
         o.apply(&mut s);
-        assert_eq!(s.process.executable, "rg");
-        assert_eq!(s.process.args, vec!["foo", "--color"]);
-        // tty is untouched by an argv override.
+        // Executable is the spec's — sealed by the image, never overridden.
+        assert_eq!(s.process.executable, "bash");
+        assert_eq!(s.process.args, vec!["-c", "echo hi"]);
+        // tty is untouched by an args override.
         assert!(!s.process.terminal);
     }
 
     #[test]
-    fn empty_argv_leaves_exec_unchanged() {
+    fn empty_args_leaves_process_unchanged() {
         let o = Overrides::default();
         let mut s = spec();
         o.apply(&mut s);

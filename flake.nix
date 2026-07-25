@@ -81,7 +81,20 @@
           pierogi = pkgs.rustPlatform.buildRustPackage {
             pname = "pierogi";
             version = "0.0.0";
-            src = ./.;
+            # Only the actual build inputs, so edits to nix/ , docs/, README,
+            # bench.sh, todo.md don't invalidate the pierogi build (and the
+            # sandboxes that depend on its binary). `build.rs` compiles
+            # `csrc/shim.c`; the rest is the crate + lockfile.
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./Cargo.toml
+                ./Cargo.lock
+                ./build.rs
+                ./src
+                ./csrc
+              ];
+            };
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.pkg-config ];
             # Only crunDev now — libseccomp was for youki's libseccomp-rs; crun
@@ -94,13 +107,32 @@
           # M1 tire-kicker: a static bash + coreutils sandbox with a sealed
           # rootfs (baked /etc + mountpoints). Yields the built spec.json.
           bashSandbox = import ./nix/bash-sandbox.nix { inherit pkgs pierogi; };
+          # M1 tire-kicker: a wayland-info sandbox that routes the host Wayland
+          # socket in (baked socket mountpoint + a runtime host bind).
+          waylandSandbox = import ./nix/wayland-sandbox.nix { inherit pkgs pierogi; };
+          # M1 tire-kicker: foot — a graphical Wayland terminal over the same
+          # socket routing, plus a baked font / fontconfig / terminfo userland.
+          footSandbox = import ./nix/foot-sandbox.nix { inherit pkgs pierogi; };
         in {
           crun-dev = crunDev;
           inherit pierogi;
-          # The self-contained pre-baked spec.json (closure stamped in). This is
-          # the only runnable form — there is no live-query path to `run` an
-          # unbuilt spec against.
-          bash-sandbox = bashSandbox.resolved;
+          # A wrapper that execs `pierogi run` against the pre-baked spec.json
+          # (closure stamped in), forwarding args. `nix run .#bash-sandbox` — or
+          # `… -- --env FOO=bar -- ls` to pass the `run` bridge's overrides. The
+          # built spec is the only runnable form (no live-query path); this just
+          # pairs it with the pierogi binary that runs it.
+          bash-sandbox = bashSandbox.runnable;
+          # The bare spec.json, for inspection / benchmarking (bench.sh).
+          bash-sandbox-spec = bashSandbox.resolved;
+          # A wrapper that binds the host Wayland socket in, then execs
+          # `pierogi run wayland-info` — a smoke test for socket routing. Run
+          # inside a Wayland session: `nix run .#wayland-sandbox`.
+          wayland-sandbox = waylandSandbox.runnable;
+          wayland-sandbox-spec = waylandSandbox.resolved;
+          # A graphical Wayland terminal (foot) over the routed socket. Run
+          # inside a Wayland session: `nix run .#foot-sandbox` (opens a window).
+          foot-sandbox = footSandbox.runnable;
+          foot-sandbox-spec = footSandbox.resolved;
         });
 
       devShells = forAll (system:

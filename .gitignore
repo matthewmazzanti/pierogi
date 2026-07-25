@@ -1,3 +1,6 @@
 /target
 /result
 .direnv/
+
+# Per-sandbox persistent state, bind-mounted to /root in the sandboxes.
+/state/
