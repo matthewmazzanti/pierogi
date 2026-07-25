@@ -5,6 +5,37 @@
 # root builders expose it directly). No `set -e` here — nix builders already run
 # under errexit, and a lib shouldn't impose shell options on its caller.
 
+# bin_farm <pkg>...
+#
+# Symlink each package's `bin/*` into `$out/bin`, with absolute targets into
+# /nix/store (they resolve inside the sandbox because the closure is bound
+# there). Fail loud on a collision — two packages providing the same command
+# name with *different* targets — the way `buildEnv` does, rather than silently
+# overwriting (`ln -sf`, last wins) or skipping (`lndir -silent`, first wins). A
+# curated tool list shouldn't collide; if it does, that's a bug to surface, not
+# paper over. (The same target twice — a tool listed more than once — is
+# idempotent, not a collision.)
+bin_farm() {
+  mkdir -p "$out/bin"
+  local pkg f name dest have
+  for pkg in "$@"; do
+    for f in "$pkg"/bin/*; do
+      [ -e "$f" ] || continue                 # empty/absent bin/ — glob didn't match
+      name=$(basename "$f")
+      dest="$out/bin/$name"
+      if [ -L "$dest" ]; then
+        have=$(readlink "$dest")
+        [ "$have" = "$f" ] && continue         # same target — idempotent, fine
+        echo "bin_farm: /bin/$name collision:" >&2
+        echo "  have $have" >&2
+        echo "  want $f" >&2
+        exit 1
+      fi
+      ln -s "$f" "$dest"
+    done
+  done
+}
+
 # bake_store_mounts <store-path>...
 #
 # Bake one `/nix/store/<hash>` mountpoint per store-path argument, matching the

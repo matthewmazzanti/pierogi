@@ -96,14 +96,10 @@ let
     source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
-    # /bin symlink farm (buildEnv-style, but we need the same derivation to bake
-    # mountpoints, so it's hand-rolled). Absolute targets into /nix/store, which
-    # resolve inside the sandbox because the closure is bound there.
-    for pkg in ${pkgs.lib.concatMapStringsSep " " (p: "${p}") terminalTools}; do
-      for f in "$pkg"/bin/*; do
-        ln -sf "$f" "$out/bin/$(basename "$f")"
-      done
-    done
+    # /bin symlink farm — see `bin_farm` in build-lib.sh. Absolute targets into
+    # /nix/store (resolved inside the sandbox because the closure is bound there);
+    # fails loud on a command-name collision, buildEnv-style.
+    bin_farm ${toString terminalTools}
 
     # Hand-rolled /etc — symlinks into the store (each is a closure member, so it
     # resolves inside the sandbox). A symlink, not a copy: a copy would bake

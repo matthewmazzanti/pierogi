@@ -47,11 +47,9 @@ let
     source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
-    # /bin symlink farm — absolute targets into /nix/store, resolved inside the
-    # sandbox because the closure is bound there.
-    for f in ${pkgs.wayland-utils}/bin/*; do
-      ln -sf "$f" "$out/bin/$(basename "$f")"
-    done
+    # /bin symlink farm — see `bin_farm` in build-lib.sh. Absolute targets into
+    # /nix/store, resolved inside the sandbox because the closure is bound there.
+    bin_farm ${pkgs.wayland-utils}
 
     # Hand-rolled /etc — a symlink into the store (a closure member, so it
     # resolves in-sandbox and folds into `root`'s references).

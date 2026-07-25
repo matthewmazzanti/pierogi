@@ -95,12 +95,9 @@ let
     source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
-    # /bin symlink farm — the shared terminal userland plus foot itself.
-    for pkg in ${pkgs.lib.concatMapStringsSep " " (p: "${p}") (terminalTools ++ [ pkgs.foot ])}; do
-      for f in "$pkg"/bin/*; do
-        ln -sf "$f" "$out/bin/$(basename "$f")"
-      done
-    done
+    # /bin symlink farm — the shared terminal userland plus foot itself. See
+    # `bin_farm` in build-lib.sh (fails loud on a command-name collision).
+    bin_farm ${toString (terminalTools ++ [ pkgs.foot ])}
 
     # Hand-rolled /etc — store symlinks (closure members, resolve in-sandbox and
     # fold into root's references). `/etc/fonts.conf` → the fontconfig file (→
