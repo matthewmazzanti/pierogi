@@ -66,7 +66,7 @@ let
 
     # The /nix/store/<hash> mountpoints (kind matches source) + root's own
     # /nix/store/<self> identity mountpoint. See `bake_store_mounts` in build-lib.sh.
-    bake_store_mounts ${lib.storePaths deps}
+    bake_store_mounts $(cat ${lib.storePaths deps})
   '';
 
   # The default-closed floor, as spec fields (see nix/profiles.nix).

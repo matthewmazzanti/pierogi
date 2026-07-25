@@ -125,7 +125,7 @@ let
     # the source) + root's own /nix/store/<self> identity mountpoint. See
     # `bake_store_mounts` in build-lib.sh. `deps` is root's references (not root
     # itself — circular), so their closure is exactly what root needs bound.
-    bake_store_mounts ${lib.storePaths deps}
+    bake_store_mounts $(cat ${lib.storePaths deps})
   '';
 
   # The default-closed floor, as spec fields — the engine holds no policy, so

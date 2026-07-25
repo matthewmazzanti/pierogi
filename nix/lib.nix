@@ -20,11 +20,13 @@ rec {
   # Nix-string escaping.
   buildLib = ./build-lib.sh;
 
-  # The `store-paths` file for a dep set — the input to `bake_store_mounts`.
-  # `closureInfo` folds each dep's own closure in, so this is the full set of
-  # `/nix/store/<hash>` mountpoints the sealed root needs (its own `<self>` is
-  # added by `bake_store_mounts` from `$out`). Takes a dep *list*; the caller
-  # never touches `closureInfo`.
+  # The `store-paths` file for a dep set — fed to `bake_store_mounts` as
+  # `bake_store_mounts $(cat ${lib.storePaths deps})`. `closureInfo` folds each
+  # dep's own closure in, so this is the full set of `/nix/store/<hash>`
+  # mountpoints the sealed root needs (its own `<self>` is added by
+  # `bake_store_mounts` from `$out`). Takes a dep *list*; the caller never
+  # touches `closureInfo`. (A file, not an inline list, to avoid import-from-
+  # derivation — the closure is only known at build time.)
   storePaths = deps: "${pkgs.closureInfo { rootPaths = deps; }}/store-paths";
 
   # The producer-lifted base mounts, as individual named OCI mount entries —
