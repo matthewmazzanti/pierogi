@@ -49,7 +49,7 @@ let
 
     # /bin symlink farm — see `bin_farm` in build-lib.sh. Absolute targets into
     # /nix/store, resolved inside the sandbox because the closure is bound there.
-    bin_farm ${pkgs.wayland-utils}
+    bin_farm ${pkgs.lib.escapeShellArg pkgs.wayland-utils}
 
     # Hand-rolled /etc — a symlink into the store (a closure member, so it
     # resolves in-sandbox and folds into `root`'s references).
@@ -59,7 +59,7 @@ let
     # `/run/user/1000` Wayland socket dir. The `wayland-0` **file** is the
     # socket's bind target (a socket binds onto a file), so it's `touch`ed, not a
     # dir. The read-only rootfs can't grow these at launch — hence baking them.
-    bake_dirs ${toString lib.defaultMountDirs} /run/user/1000
+    bake_dirs ${pkgs.lib.escapeShellArgs lib.defaultMountDirs} /run/user/1000
     touch $out/run/user/1000/wayland-0
 
     # The /nix/store/<hash> mountpoints (kind matches source) + root's own

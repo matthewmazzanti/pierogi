@@ -99,7 +99,7 @@ let
     # /bin symlink farm — see `bin_farm` in build-lib.sh. Absolute targets into
     # /nix/store (resolved inside the sandbox because the closure is bound there);
     # fails loud on a command-name collision, buildEnv-style.
-    bin_farm ${toString terminalTools}
+    bin_farm ${pkgs.lib.escapeShellArgs terminalTools}
 
     # Hand-rolled /etc — symlinks into the store (each is a closure member, so it
     # resolves inside the sandbox). A symlink, not a copy: a copy would bake
@@ -115,7 +115,7 @@ let
     # Baked mountpoints — the base trio's dirs (proc/dev/tmp) + this sandbox's
     # own (/home/pierogi, /root). See `bake_dirs` in build-lib.sh; the read-only
     # rootfs can't grow these at launch, so the mount topology is frozen here.
-    bake_dirs ${toString lib.defaultMountDirs} /home/pierogi /root
+    bake_dirs ${pkgs.lib.escapeShellArgs lib.defaultMountDirs} /home/pierogi /root
 
     # The /nix/store/<hash> mountpoints (one per closure member, kind matching
     # the source) + root's own /nix/store/<self> identity mountpoint. See

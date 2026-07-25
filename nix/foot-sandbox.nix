@@ -97,7 +97,7 @@ let
 
     # /bin symlink farm — the shared terminal userland plus foot itself. See
     # `bin_farm` in build-lib.sh (fails loud on a command-name collision).
-    bin_farm ${toString (terminalTools ++ [ pkgs.foot ])}
+    bin_farm ${pkgs.lib.escapeShellArgs (terminalTools ++ [ pkgs.foot ])}
 
     # Hand-rolled /etc — store symlinks (closure members, resolve in-sandbox and
     # fold into root's references). `/etc/fonts.conf` → the fontconfig file (→
@@ -113,7 +113,7 @@ let
     # fontconfig's cachedir) + this sandbox's own (/home/pierogi, /root, and the
     # `/run/user/1000` Wayland socket dir). The `wayland-0` **file** is the socket
     # bind target (a socket binds onto a file), so it's `touch`ed, not a dir.
-    bake_dirs ${toString lib.defaultMountDirs} /home/pierogi /root /run/user/1000
+    bake_dirs ${pkgs.lib.escapeShellArgs lib.defaultMountDirs} /home/pierogi /root /run/user/1000
     touch $out/run/user/1000/wayland-0
 
     # The /nix/store/<hash> mountpoints (kind matches source) + root's own
