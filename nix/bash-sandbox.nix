@@ -140,22 +140,24 @@ let
   # `tty`, `environment`. The rest are faithful OCI pass-throughs (from `base`).
   # `root`/`closure` stay Nix-shaped. See `docs/spec.md`.
   unresolvedSpec = pkgs.lib.recursiveUpdate profiles.base {
-    root = "${root}";
-    executable = "bash";
-    args = [ "--norc" ];
-    tty = true;
+    root.path = "${root}";
+    process = {
+      executable = "bash";
+      args = [ "--norc" ];
+      terminal = true;
+      env = {
+        # /bin is root's own bin/, surfaced at /. `/nix/store/<root>/bin` would
+        # work too now that root is identity-bound, but /bin is shorter.
+        PATH = "/bin";
+        HOME = "/home/pierogi";
+        TERM = "xterm-256color";
+      };
+    };
     # Writable scratch onto the baked /tmp mountpoint — a verbatim OCI mount
     # (destination/type/options), producer-owned options and all.
     mounts = [
       { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
     ];
-    environment = {
-      # /bin is root's own bin/, surfaced at /. `/nix/store/<root>/bin` would
-      # work too now that root is identity-bound, but /bin is shorter.
-      PATH = "/bin";
-      HOME = "/home/pierogi";
-      TERM = "xterm-256color";
-    };
     # Seeds: the store paths pierogi traverses the reference graph from. Here
     # just `root` (its closure covers bash/coreutils/etc). A producer declares
     # these; an overlay lower would be added alongside root.

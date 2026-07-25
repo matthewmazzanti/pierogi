@@ -29,48 +29,60 @@ surface is meant to grow are catalogued in
 
 ## v0 schema
 
-The spec is a **faithful projection of the OCI runtime spec** plus two nix
-carve-outs (`root`, `closure`). The engine holds **no policy** and projects
-whatever the spec carries, `absent = absent` (see
+The spec **mirrors the OCI runtime spec's structure** — `root`, `process`,
+`linux`, `mounts`, `hostname`, … — plus one nix carve-out, `closure`. The engine
+holds **no policy** and projects whatever the spec carries, `absent = absent` (see
 [control-surface.md](control-surface.md), [architecture.md](architecture.md)'s
-third principle). So the OCI knobs — `capabilities`, `seccomp`, `namespaces`,
-mappings, masks, rlimits, `mounts` — are **pass-through**, and the default-closed
+third principle). So the OCI knobs are **pass-through**, and the default-closed
 floor is *not here*: it's `profiles.base` in the Nix producer layer, composed into
-a spec before the engine sees it. Ergonomics ride on top: compose-flavoured names
-(`environment`, `working_dir`, `tty`, `hostname`, `read_only`) and an execve argv
-split (`executable` + `args`). The big verbatim-OCI fields reuse `oci_spec` types
-directly rather than mirror them.
+a spec before the engine sees it. Verbatim-OCI leaves reuse `oci_spec` types
+directly. `deny_unknown_fields` at every level makes an unmodeled OCI field a hard
+error, not a silent drop.
 
 ```rust
-struct Spec {
-    // ── nix carve-outs ──
-    root:        StorePath,                // rootfs (mounted at /); PATH base; also in closure
-    closure:     Closure,                  // Nix store view { seeds, resolved }
-
-    // ── process: execve argv + compose-flavoured descriptive ──
-    executable:  String,                   // execve: name (via environment.PATH) or a store path
-    args:        Vec<String>,              // execve: the rest of argv
-    tty:         bool,                     // process.terminal (+ console relay)
-    working_dir: Option<PathBuf>,          // process.cwd, absent => /
-    hostname:    Option<String>,           // hostname, absent => not emitted
-    environment: BTreeMap<String, String>, // process.env; PATH lives here
-
-    // ── OCI pass-throughs (absent = absent; the floor is a producer's job) ──
-    read_only:         Option<bool>,          // root.readonly
-    no_new_privileges: Option<bool>,          // process.noNewPrivileges
-    capabilities:      Option<Vec<String>>,   // process.capabilities; Some([]) = drop-all
-    rlimits:           Vec<PosixRlimit>,      // process.rlimits           (oci_spec type)
-    masked_paths:      Vec<String>,           // linux.maskedPaths
-    readonly_paths:    Vec<String>,           // linux.readonlyPaths
-    rootfs_propagation: Option<String>,       // linux.rootfsPropagation
-    namespaces:        Vec<LinuxNamespace>,   // linux.namespaces          (oci_spec type)
-    uid_mappings:      Vec<IdMapping>,        // linux.uidMappings (host: N | "self")
-    gid_mappings:      Vec<IdMapping>,        // linux.gidMappings
-    seccomp:           Option<LinuxSeccomp>,  // linux.seccomp             (oci_spec type)
-    devices:           Vec<LinuxDevice>,      // linux.devices             (oci_spec type)
-
-    // ── placements ──
+struct Spec {                              // mirrors oci_spec::Spec
+    root:        Root,                     // OCI root; path is a StorePath (carve-out)
+    process:     Process,                  // OCI process
     mounts:      Vec<oci_spec::Mount>,     // verbatim OCI mounts (bind/tmpfs/overlay/idmapped)
+    hostname:    Option<String>,           // OCI hostname
+    domainname:  Option<String>,           // OCI domainname
+    annotations: BTreeMap<String, String>, // OCI annotations (metadata)
+    linux:       Linux,                    // OCI linux
+    closure:     Closure,                  // Nix store view { seeds, resolved } — the carve-out
+}
+
+struct Root {                              // OCI root
+    path:     StorePath,                   // sealed rootfs (carve-out: a store path, not PathBuf)
+    readonly: Option<bool>,                // root.readonly
+}
+
+struct Process {                           // OCI process (execve split + map/list ergonomics)
+    executable:        String,             // execve argv[0] (via env.PATH or a store path)
+    args:              Vec<String>,        // execve: the rest of argv
+    terminal:          bool,               // process.terminal (+ console relay)
+    user:              Option<User>,       // process.user            (oci_spec type)
+    cwd:               Option<PathBuf>,    // process.cwd, absent => /
+    env:               BTreeMap<String, String>, // process.env (a MAP here); PATH lives here
+    capabilities:      Option<Vec<String>>,// process.capabilities as add-list; Some([]) = drop-all
+    rlimits:           Vec<PosixRlimit>,   // process.rlimits         (oci_spec type)
+    no_new_privileges: Option<bool>,       // process.noNewPrivileges
+    oom_score_adj:     Option<i32>,        // process.oomScoreAdj
+}
+
+struct Linux {                             // OCI linux — all faithful pass-throughs
+    namespaces:      Vec<LinuxNamespace>,  // (oci_spec type; path => join)
+    uid_mappings:    Vec<IdMapping>,       // linux.uidMappings (host: N | "self")
+    gid_mappings:    Vec<IdMapping>,
+    masked_paths:    Vec<String>,
+    readonly_paths:  Vec<String>,
+    rootfs_propagation: Option<String>,
+    seccomp:         Option<LinuxSeccomp>, // (oci_spec type)
+    devices:         Vec<LinuxDevice>,     // (oci_spec type)
+    resources:       Option<LinuxResources>, // memory/cpu/pids/…  (oci_spec type)
+    cgroups_path:    Option<PathBuf>,
+    sysctl:          BTreeMap<String, String>,
+    net_devices:     BTreeMap<String, LinuxNetDevice>, // (oci_spec type)
+    personality:     Option<LinuxPersonality>,         // (oci_spec type)
 }
 
 struct Closure {
@@ -83,6 +95,10 @@ struct Closure {
 struct IdMapping { container: u32, host: HostId, size: u32 }
 enum   HostId    { Numeric(u32), Invoker /* "self" */ }
 ```
+
+Deliberate divergences from a literal OCI mirror: `root.path` is a `StorePath`;
+argv keeps the **execve** split (`process.executable` + `args`, vs OCI's single
+`args`); `process.env` is a map and `process.capabilities` an add-list.
 
 **There is no custom `Mount` type.** A `Host` bind, a `Tmpfs`, an overlay
 (`type: "overlay"` with `lowerdir`/`upperdir`/`workdir` in `options`), and an
@@ -330,15 +346,17 @@ is **not runnable** either way until built: `run` fails loud without
 
 ```json
 {
-  "root": "/nix/store/aaaa-base-env",
-  "executable": "bash",
-  "args": ["-l"],
-  "tty": true,
-  "working_dir": "/home/dev",
-  "environment": {
-    "PATH": "/bin",
-    "HOME": "/home/dev",
-    "TERM": "xterm-256color"
+  "root": { "path": "/nix/store/aaaa-base-env" },
+  "process": {
+    "executable": "bash",
+    "args": ["-l"],
+    "terminal": true,
+    "cwd": "/home/dev",
+    "env": {
+      "PATH": "/bin",
+      "HOME": "/home/dev",
+      "TERM": "xterm-256color"
+    }
   },
   "mounts": [
     { "type": "bind",  "source": "/etc/resolv.conf", "destination": "/etc/resolv.conf", "options": ["bind","ro","nosuid","nodev"] },

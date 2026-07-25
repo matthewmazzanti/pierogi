@@ -18,13 +18,16 @@
 //!   — not a producer knob).
 //! * `mounts` → **verbatim OCI mounts**, straight through (binds, tmpfs,
 //!   overlays, idmapped mounts — no special mount kind).
-//! * `executable`+`args` → `process.args`; `tty` → `process.terminal` (+ devpts);
-//!   `working_dir` → `process.cwd`; `environment` → `process.env`.
-//! * `read_only`/`no_new_privileges`/`capabilities`/`rlimits`/`masked_paths`/
-//!   `readonly_paths`/`rootfs_propagation`/`namespaces`/`{uid,gid}_mappings`/
-//!   `seccomp`/`devices` → the matching OCI fields, pass-through.
-//! * OCI `root.path` **is `root`** — the sealed rootfs mounted at `/`.
+//! * `process.executable`+`args` → `process.args`; `process.terminal` (+ devpts);
+//!   `process.cwd`; `process.env`; `process.{user,capabilities,rlimits,
+//!   no_new_privileges,oom_score_adj}` → the matching OCI process fields.
+//! * `linux.*` (namespaces, `{uid,gid}_mappings`, masks, seccomp, devices,
+//!   resources, sysctl, …) and `root.readonly` → the matching OCI fields.
+//! * The spec **mirrors the OCI structure** (`root`/`process`/`linux`), so most
+//!   of this is a `spec.<obj>.<field>` → OCI `<obj>.<field>` copy.
+//! * OCI `root.path` is `spec.root.path` — the sealed rootfs mounted at `/`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -55,23 +58,30 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("build_spec called on an unresolved spec"))?;
 
+    let (proc, lin) = (&spec.process, &spec.linux);
+
     // ── linux: namespaces (verbatim) + id mappings + the pass-through rest ──
-    let uid_mappings = build_id_mappings(&spec.uid_mappings, input.uid)?;
-    let gid_mappings = build_id_mappings(&spec.gid_mappings, input.gid)?;
+    let uid_mappings = build_id_mappings(&lin.uid_mappings, input.uid)?;
+    let gid_mappings = build_id_mappings(&lin.gid_mappings, input.gid)?;
 
     let mut linux = LinuxBuilder::default().build()?;
-    linux.set_namespaces(non_empty(spec.namespaces.clone()));
+    linux.set_namespaces(non_empty(lin.namespaces.clone()));
     linux.set_uid_mappings(non_empty(uid_mappings));
     linux.set_gid_mappings(non_empty(gid_mappings));
-    linux.set_masked_paths(non_empty(spec.masked_paths.clone()));
-    linux.set_readonly_paths(non_empty(spec.readonly_paths.clone()));
-    linux.set_rootfs_propagation(spec.rootfs_propagation.clone());
-    linux.set_seccomp(spec.seccomp.clone());
-    linux.set_devices(non_empty(spec.devices.clone()));
+    linux.set_masked_paths(non_empty(lin.masked_paths.clone()));
+    linux.set_readonly_paths(non_empty(lin.readonly_paths.clone()));
+    linux.set_rootfs_propagation(lin.rootfs_propagation.clone());
+    linux.set_seccomp(lin.seccomp.clone());
+    linux.set_devices(non_empty(lin.devices.clone()));
+    linux.set_resources(lin.resources.clone());
+    linux.set_cgroups_path(lin.cgroups_path.clone());
+    linux.set_sysctl(non_empty_map(lin.sysctl.clone()));
+    linux.set_net_devices(non_empty_map(lin.net_devices.clone()));
+    linux.set_personality(lin.personality.clone());
 
     // ── mounts: engine-essential base, then closure binds, then placements ──
     let mut mounts = base_mounts()?;
-    if spec.tty {
+    if proc.terminal {
         mounts.push(devpts_mount()?);
     }
     // Closure identity binds: ro,nosuid,nodev — a mechanism constant (the store is
@@ -91,21 +101,18 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
     mounts.extend(spec.mounts.iter().cloned());
 
     // ── process: always-set fields, then the pass-throughs via setters ──
-    let user = UserBuilder::default().uid(0u32).gid(0u32).build()?;
-    let env: Vec<String> = spec
-        .environment
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
-    let mut argv = vec![spec.executable.clone()];
-    argv.extend(spec.args.iter().cloned());
-    let cwd = spec
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("/"));
+    // Run-as identity: the producer's `user` verbatim, or uid 0/gid 0 by default.
+    let user = match &proc.user {
+        Some(u) => u.clone(),
+        None => UserBuilder::default().uid(0u32).gid(0u32).build()?,
+    };
+    let env: Vec<String> = proc.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let mut argv = vec![proc.executable.clone()];
+    argv.extend(proc.args.iter().cloned());
+    let cwd = proc.cwd.clone().unwrap_or_else(|| PathBuf::from("/"));
 
     let mut process = ProcessBuilder::default()
-        .terminal(spec.tty)
+        .terminal(proc.terminal)
         .user(user)
         .args(argv)
         .env(env)
@@ -113,16 +120,17 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
         .build()?;
     // Neutralize oci-spec's Process::default() (nnp=true, 3 caps, a nofile
     // rlimit): emit exactly what the spec carries, or nothing.
-    process.set_no_new_privileges(spec.no_new_privileges);
-    process.set_capabilities(build_capabilities(spec.capabilities.as_deref())?);
-    process.set_rlimits(non_empty(spec.rlimits.clone()));
+    process.set_no_new_privileges(proc.no_new_privileges);
+    process.set_capabilities(build_capabilities(proc.capabilities.as_deref())?);
+    process.set_rlimits(non_empty(proc.rlimits.clone()));
+    process.set_oom_score_adj(proc.oom_score_adj);
 
     // ── root: the sealed rootfs; readonly is a pass-through (default `true` in
     // oci-spec would otherwise leak) ──
     let mut root = RootBuilder::default()
-        .path(spec.root.as_path().to_path_buf())
+        .path(spec.root.path.as_path().to_path_buf())
         .build()?;
-    root.set_readonly(spec.read_only);
+    root.set_readonly(spec.root.readonly);
 
     let mut oci = SpecBuilder::default()
         .version("1.1.0")
@@ -133,7 +141,19 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
         .build()?;
     // hostname is a pass-through too (oci-spec defaults it to "youki").
     oci.set_hostname(spec.hostname.clone());
+    oci.set_domainname(spec.domainname.clone());
+    oci.set_annotations(non_empty_map(spec.annotations.clone()));
     Ok(oci)
+}
+
+/// Like [`non_empty`] for maps: `Some(HashMap)` when non-empty, else `None`.
+/// Also converts our deterministic `BTreeMap` to the OCI `HashMap`.
+fn non_empty_map<V>(m: std::collections::BTreeMap<String, V>) -> Option<HashMap<String, V>> {
+    if m.is_empty() {
+        None
+    } else {
+        Some(m.into_iter().collect())
+    }
 }
 
 /// `Some(vec)` when non-empty, else `None` — so an absent list becomes an absent
@@ -245,7 +265,7 @@ fn bind_mount(dest: &str, source: &str, options: &[String]) -> Result<OciMount> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{Closure, StorePath};
+    use crate::spec::{Closure, Linux, Process, Root, StorePath};
     use oci_spec::runtime::{LinuxNamespaceBuilder, LinuxNamespaceType};
     use std::collections::BTreeMap;
 
@@ -253,29 +273,30 @@ mod tests {
     /// spec) — used to prove the engine adds no floor of its own.
     fn bare_resolved_spec() -> Spec {
         Spec {
-            root: StorePath::new("/nix/store/aaaa-root").unwrap(),
+            root: Root {
+                path: StorePath::new("/nix/store/aaaa-root").unwrap(),
+                readonly: None,
+            },
             closure: Closure {
                 seeds: vec![StorePath::new("/nix/store/aaaa-root").unwrap()],
                 resolved: Some(vec![StorePath::new("/nix/store/aaaa-root").unwrap()]),
             },
-            executable: "bash".into(),
-            args: vec![],
-            tty: false,
-            working_dir: None,
+            process: Process {
+                executable: "bash".into(),
+                args: vec![],
+                terminal: false,
+                user: None,
+                cwd: None,
+                env: BTreeMap::new(),
+                capabilities: None,
+                rlimits: vec![],
+                no_new_privileges: None,
+                oom_score_adj: None,
+            },
             hostname: None,
-            environment: BTreeMap::new(),
-            read_only: None,
-            no_new_privileges: None,
-            capabilities: None,
-            rlimits: vec![],
-            masked_paths: vec![],
-            readonly_paths: vec![],
-            rootfs_propagation: None,
-            namespaces: vec![],
-            uid_mappings: vec![],
-            gid_mappings: vec![],
-            seccomp: None,
-            devices: vec![],
+            domainname: None,
+            annotations: BTreeMap::new(),
+            linux: Linux::default(),
             mounts: vec![],
         }
     }
@@ -306,16 +327,16 @@ mod tests {
     #[test]
     fn passthroughs_project_faithfully() {
         let mut spec = bare_resolved_spec();
-        spec.read_only = Some(true);
-        spec.no_new_privileges = Some(true);
+        spec.root.readonly = Some(true);
+        spec.process.no_new_privileges = Some(true);
         spec.hostname = Some("box".into());
-        spec.capabilities = Some(vec!["NET_BIND_SERVICE".into()]);
-        spec.masked_paths = vec!["/proc/kcore".into()];
-        spec.namespaces = vec![LinuxNamespaceBuilder::default()
+        spec.process.capabilities = Some(vec!["NET_BIND_SERVICE".into()]);
+        spec.linux.masked_paths = vec!["/proc/kcore".into()];
+        spec.linux.namespaces = vec![LinuxNamespaceBuilder::default()
             .typ(LinuxNamespaceType::User)
             .build()
             .unwrap()];
-        spec.uid_mappings = vec![IdMapping {
+        spec.linux.uid_mappings = vec![IdMapping {
             container: 0,
             host: HostId::Invoker,
             size: 1,
@@ -344,9 +365,32 @@ mod tests {
     }
 
     #[test]
+    fn new_passthroughs_project_and_default_user_is_zero() {
+        let mut spec = bare_resolved_spec();
+        spec.process.oom_score_adj = Some(-800);
+        spec.linux.cgroups_path = Some("/pierogi/box".into());
+        spec.linux.sysctl.insert("net.ipv4.ip_forward".into(), "0".into());
+        spec.annotations.insert("k".into(), "v".into());
+        let oci = build_spec(&RealizeInputs {
+            spec: &spec,
+            uid: 7,
+            gid: 7,
+        })
+        .unwrap();
+        let process = oci.process().as_ref().unwrap();
+        assert_eq!(process.oom_score_adj(), Some(-800));
+        // absent `user` → uid 0/gid 0.
+        assert_eq!(process.user().uid(), 0);
+        let linux = oci.linux().as_ref().unwrap();
+        assert_eq!(linux.cgroups_path().as_ref().unwrap(), &PathBuf::from("/pierogi/box"));
+        assert!(linux.sysctl().is_some());
+        assert!(oci.annotations().is_some());
+    }
+
+    #[test]
     fn drop_all_caps_is_distinct_from_absent() {
         let mut spec = bare_resolved_spec();
-        spec.capabilities = Some(vec![]); // drop-all
+        spec.process.capabilities = Some(vec![]); // drop-all
         let oci = build_spec(&RealizeInputs {
             spec: &spec,
             uid: 1,
@@ -366,7 +410,7 @@ mod tests {
     #[test]
     fn unknown_capability_fails_loud() {
         let mut spec = bare_resolved_spec();
-        spec.capabilities = Some(vec!["NOT_A_CAP".into()]);
+        spec.process.capabilities = Some(vec!["NOT_A_CAP".into()]);
         assert!(build_spec(&RealizeInputs {
             spec: &spec,
             uid: 1,

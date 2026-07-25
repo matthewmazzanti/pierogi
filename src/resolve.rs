@@ -58,10 +58,10 @@ pub fn resolve_from_graph(spec: &mut Spec, graph_json: &str) -> Result<()> {
     }
     let graph = parse_reference_graph(graph_json)?;
     let resolved = closure_of(&graph, &spec.closure.seeds)?;
-    if !resolved.contains(&spec.root) {
+    if !resolved.contains(&spec.root.path) {
         bail!(
             "the seeds' closure does not cover root {}; add it to `closure.seeds`",
-            spec.root
+            spec.root.path
         );
     }
     spec.closure.resolved = Some(resolved);
@@ -133,39 +133,39 @@ fn closure_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::Closure;
-    use std::collections::BTreeMap;
+    use crate::spec::{Closure, Linux, Process, Root};
 
     /// Build an unbuilt spec seeded from `root` (the common case). Tests that need
     /// other seeds set `spec.closure.seeds` directly — it's a producer-declared
     /// input, not something the engine derives.
     fn spec_with(root: &str) -> Spec {
-        let root = StorePath::new(root).unwrap();
+        let path = StorePath::new(root).unwrap();
         Spec {
-            executable: "bash".into(),
-            args: vec![],
-            tty: false,
-            working_dir: None,
-            hostname: None,
+            root: Root {
+                path: path.clone(),
+                readonly: None,
+            },
             closure: Closure {
-                seeds: vec![root.clone()],
+                seeds: vec![path],
                 resolved: None,
             },
-            root,
+            process: Process {
+                executable: "bash".into(),
+                args: vec![],
+                terminal: false,
+                user: None,
+                cwd: None,
+                env: Default::default(),
+                capabilities: None,
+                rlimits: vec![],
+                no_new_privileges: None,
+                oom_score_adj: None,
+            },
+            hostname: None,
+            domainname: None,
+            annotations: Default::default(),
+            linux: Linux::default(),
             mounts: vec![],
-            environment: BTreeMap::new(),
-            read_only: None,
-            no_new_privileges: None,
-            capabilities: None,
-            rlimits: vec![],
-            masked_paths: vec![],
-            readonly_paths: vec![],
-            rootfs_propagation: None,
-            namespaces: vec![],
-            uid_mappings: vec![],
-            gid_mappings: vec![],
-            seccomp: None,
-            devices: vec![],
         }
     }
 

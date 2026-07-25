@@ -4,7 +4,7 @@
 //! Supported overrides: `--env`, `--hostname`, an argv override (trailing
 //! `-- cmd args`), and additive **host / tmpfs** mounts.
 //!
-//! * `environment` / `hostname` / argv rewrite spec fields in place.
+//! * `env` / `hostname` / argv rewrite spec fields in place.
 //! * host / tmpfs mounts are never closure seeds (only an `Overlay` lower is),
 //!   so they layer on without a query and without tripping a sealed spec's drift
 //!   check. Their dest mountpoints must already exist in the sealed `root` — a
@@ -27,7 +27,7 @@ use crate::spec::Spec;
 /// Parsed CLI overrides for the `run` verb.
 #[derive(Debug, Default)]
 pub struct Overrides {
-    /// `--env KEY=VALUE` pairs, applied over `spec.environment` (insert /
+    /// `--env KEY=VALUE` pairs, applied over `spec.process.env` (insert /
     /// overwrite).
     env: Vec<(String, String)>,
     /// `--hostname NAME`, replacing `spec.hostname`.
@@ -35,7 +35,7 @@ pub struct Overrides {
     /// `--mount …` additive host / tmpfs mounts (verbatim OCI mounts), appended
     /// to `spec.mounts`.
     mounts: Vec<OciMount>,
-    /// Trailing `-- cmd args…` overriding `spec.executable` + `spec.args` (empty
+    /// Trailing `-- cmd args…` overriding `spec.process.executable` + `.args` (empty
     /// = no override).
     argv: Vec<String>,
 }
@@ -78,7 +78,7 @@ impl Overrides {
     /// against the resolved closure by the runtime at launch (in-sandbox).
     pub fn apply(self, spec: &mut Spec) {
         for (k, v) in self.env {
-            spec.environment.insert(k, v);
+            spec.process.env.insert(k, v);
         }
         if let Some(hostname) = self.hostname {
             spec.hostname = Some(hostname);
@@ -87,8 +87,8 @@ impl Overrides {
         if !self.argv.is_empty() {
             let mut it = self.argv.into_iter();
             // Non-empty checked above, so `next()` yields the executable.
-            spec.executable = it.next().expect("argv non-empty");
-            spec.args = it.collect();
+            spec.process.executable = it.next().expect("argv non-empty");
+            spec.process.args = it.collect();
         }
     }
 }
@@ -177,31 +177,32 @@ fn abs_dest(dest: &str, whole: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{Closure, StorePath};
+    use crate::spec::{Closure, Linux, Process, Root, StorePath};
     use std::collections::BTreeMap;
 
     fn spec() -> Spec {
         Spec {
-            executable: "bash".into(),
-            args: vec!["-l".into()],
-            tty: false,
-            working_dir: None,
+            root: Root {
+                path: StorePath::new("/nix/store/aaaa-root").unwrap(),
+                readonly: None,
+            },
+            process: Process {
+                executable: "bash".into(),
+                args: vec!["-l".into()],
+                terminal: false,
+                user: None,
+                cwd: None,
+                env: BTreeMap::from([("PATH".into(), "/nix/store/aaaa-root/bin".into())]),
+                capabilities: None,
+                rlimits: vec![],
+                no_new_privileges: None,
+                oom_score_adj: None,
+            },
             hostname: None,
-            root: StorePath::new("/nix/store/aaaa-root").unwrap(),
+            domainname: None,
+            annotations: BTreeMap::new(),
+            linux: Linux::default(),
             mounts: vec![],
-            environment: BTreeMap::from([("PATH".into(), "/nix/store/aaaa-root/bin".into())]),
-            read_only: None,
-            no_new_privileges: None,
-            capabilities: None,
-            rlimits: vec![],
-            masked_paths: vec![],
-            readonly_paths: vec![],
-            rootfs_propagation: None,
-            namespaces: vec![],
-            uid_mappings: vec![],
-            gid_mappings: vec![],
-            seccomp: None,
-            devices: vec![],
             closure: Closure::default(),
         }
     }
@@ -217,9 +218,9 @@ mod tests {
         .unwrap();
         let mut s = spec();
         o.apply(&mut s);
-        assert_eq!(s.environment.get("FOO").unwrap(), "bar");
-        assert_eq!(s.environment.get("PATH").unwrap(), "/override");
-        assert_eq!(s.environment.get("EMPTY").unwrap(), "");
+        assert_eq!(s.process.env.get("FOO").unwrap(), "bar");
+        assert_eq!(s.process.env.get("PATH").unwrap(), "/override");
+        assert_eq!(s.process.env.get("EMPTY").unwrap(), "");
         assert!(s.closure.resolved.is_none());
     }
 
@@ -255,10 +256,10 @@ mod tests {
         .unwrap();
         let mut s = spec();
         o.apply(&mut s);
-        assert_eq!(s.executable, "rg");
-        assert_eq!(s.args, vec!["foo", "--color"]);
+        assert_eq!(s.process.executable, "rg");
+        assert_eq!(s.process.args, vec!["foo", "--color"]);
         // tty is untouched by an argv override.
-        assert!(!s.tty);
+        assert!(!s.process.terminal);
     }
 
     #[test]
@@ -266,8 +267,8 @@ mod tests {
         let o = Overrides::default();
         let mut s = spec();
         o.apply(&mut s);
-        assert_eq!(s.executable, "bash");
-        assert_eq!(s.args, vec!["-l"]);
+        assert_eq!(s.process.executable, "bash");
+        assert_eq!(s.process.args, vec!["-l"]);
     }
 
     #[test]

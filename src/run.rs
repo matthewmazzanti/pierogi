@@ -58,7 +58,7 @@ fn launch(spec: Spec) -> Result<()> {
     let resolved = spec.closure.resolved.as_ref().expect("asserted above");
     eprintln!(
         "pierogi: sealed rootfs {} + {} closure binds",
-        spec.root,
+        spec.root.path,
         resolved.len()
     );
 
@@ -85,7 +85,7 @@ fn launch(spec: Spec) -> Result<()> {
     // A `terminal:true` spec needs a controlling tty: bind a console socket and
     // start the relay *before* the backend runs, so the runtime can connect and
     // hand us the pty master as it starts the container.
-    let relay = if spec.tty {
+    let relay = if spec.process.terminal {
         Some(ConsoleRelay::bind(work.join("console.sock"))?)
     } else {
         None

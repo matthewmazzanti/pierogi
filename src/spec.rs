@@ -1,36 +1,37 @@
 //! The typed pierogi **Spec** — the v0 schema (see `docs/spec.md`).
 //!
-//! One descriptive, complete account of a single sandbox. The engine is a **pure
-//! realizer** (`docs/architecture.md`'s third principle): it holds **no policy**
-//! and projects whatever this spec carries into the OCI runtime spec,
-//! `absent = absent`. So the schema is a **faithful projection of the OCI spec**
-//! (`capabilities`, `seccomp`, `namespaces`, mappings, masks, rlimits, …, all
-//! pass-through) plus two nix carve-outs (`root` as a sealed rootfs, `closure` as
-//! the identity-bind set). The default-closed *floor* is not here and not in the
-//! engine — it is `profiles.base` in the Nix producer layer, composed into a spec
-//! before the engine ever sees it. See `docs/control-surface.md`.
+//! The spec **mirrors the OCI runtime spec's structure** — `root`, `process`,
+//! `linux`, `mounts`, `hostname`, … — plus one nix carve-out, `closure`. The
+//! engine is a **pure realizer** (`docs/architecture.md`'s third principle): it
+//! holds **no policy** and projects whatever the spec carries into the OCI spec,
+//! `absent = absent`. The default-closed floor is not here and not in the engine
+//! — it's `profiles.base` in the Nix producer layer, composed into a spec before
+//! the engine sees it. See `docs/control-surface.md`.
 //!
-//! Ergonomics ride on top: compose-flavoured names (`environment`, `working_dir`,
-//! `tty`, `hostname`, `read_only`) and an execve argv split (`executable` +
-//! `args`). The big verbatim-OCI fields (`seccomp`, `devices`, `rlimits`) reuse
-//! `oci_spec` types directly rather than mirror them.
+//! Verbatim-OCI leaves reuse `oci_spec` types directly (`User`, `LinuxSeccomp`,
+//! `LinuxDevice`, `LinuxResources`, `LinuxNamespace`, `PosixRlimit`,
+//! `LinuxNetDevice`, `LinuxPersonality`, `Mount`). Deliberate divergences from a
+//! literal OCI mirror: `root.path` is a `StorePath` (the sealed rootfs);
+//! `process.executable` + `process.args` keep the **execve** split; `process.env`
+//! is a map and `process.capabilities` an add-list (ergonomics); id-mapping `host`
+//! admits `"self"`. `deny_unknown_fields` at every level turns an unmodeled OCI
+//! field into a hard error rather than a silent drop.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use oci_spec::runtime::{
-    LinuxDevice, LinuxNamespace, LinuxSeccomp, Mount as OciMount, PosixRlimit,
+    LinuxDevice, LinuxNamespace, LinuxNetDevice, LinuxPersonality, LinuxResources, LinuxSeccomp,
+    Mount as OciMount, PosixRlimit, User,
 };
 use serde::{Deserialize, Serialize};
 
 /// A top-level Nix store path (`/nix/store/<hash-name>`).
 ///
 /// A newtype so the schema can make "this must be a store path" a property of
-/// the *type* rather than a runtime check scattered across the resolver —
-/// `root` and the `Overlay` mount source are `StorePath`, while a `Host` source
-/// is an opaque `PathBuf`. Validated on construction and on deserialize: any
-/// non-store path is rejected at parse time, fail-loud.
+/// the *type* rather than a runtime check. Validated on construction and on
+/// deserialize: any non-store path is rejected at parse time, fail-loud.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct StorePath(PathBuf);
@@ -73,129 +74,162 @@ impl<'de> Deserialize<'de> for StorePath {
     }
 }
 
-/// One sandbox, described completely. Flat process/behavior fields plus the OCI
-/// pass-throughs and the nix carve-outs. Every pass-through is `absent = absent`:
-/// omit it and the engine emits nothing (the OCI runtime's own default applies).
-/// A hardened sandbox is one whose producer composed `profiles.base`, so these
-/// carry the floor values — visible in the artifact, not applied by the engine.
+/// One sandbox, described completely — mirroring the OCI runtime `Spec`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Spec {
-    // ── nix carve-outs (not OCI) ──
-    /// The **rootfs**: a sealed store path mounted at `/`, carrying the whole
-    /// skeleton (`/etc`, `/bin`, every baked mountpoint) and identity-bound at
-    /// `/nix/store/<self>` (it appears in `closure.resolved`). Named `root`, not
-    /// `image`: a store-path rootfs, not a pullable registry image.
-    pub root: StorePath,
-    /// The Nix store view — `{ seeds, resolved }`. `seeds` is a build input;
-    /// `resolved` is stamped by `resolve --graph`. `run` requires `resolved`.
+    /// The rootfs (OCI `root`), whose `path` is a sealed store path.
+    pub root: Root,
+    /// The process to run (OCI `process`).
+    pub process: Process,
+    /// Placements (OCI `mounts`) — **verbatim OCI mounts** (bind / tmpfs /
+    /// overlay / idmapped). Pass-through; a mount seeds the closure only if the
+    /// producer adds its source to `closure.seeds`.
     #[serde(default)]
-    pub closure: Closure,
-
-    // ── process: execve argv + compose-flavoured descriptive fields ──
-    /// The program: a bare name (resolved via `environment.PATH`) or an absolute
-    /// store path. `execve`'s first argument, validated *against* the closure.
-    pub executable: String,
-    /// The rest of argv (`execve`'s argv tail).
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Allocate a controlling terminal (compose `tty`; OCI `process.terminal`),
-    /// which also drives the host-side console relay.
-    #[serde(default)]
-    pub tty: bool,
-    /// Working directory (compose `working_dir`; OCI `process.cwd`). Absent → `/`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_dir: Option<PathBuf>,
-    /// UTS hostname (compose `hostname`; OCI `hostname`). Absent → engine emits
-    /// none (a producer/`profiles.base` supplies it).
+    pub mounts: Vec<OciMount>,
+    /// UTS hostname (OCI `hostname`). Absent → not emitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
-    /// Producer-filled key/values (compose `environment`; OCI `process.env`).
-    /// `PATH` lives here and is the single source of truth for `executable`.
-    #[serde(default)]
-    pub environment: BTreeMap<String, String>,
-
-    // ── OCI pass-throughs (the floor lives in a producer, not here) ──
-    /// `root.readonly` (compose `read_only`). Absent → not emitted.
+    /// NIS domain name (OCI `domainname`). Absent → not emitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_only: Option<bool>,
+    pub domainname: Option<String>,
+    /// Arbitrary metadata (OCI `annotations`) — not confinement, just a record
+    /// for tooling/provenance. `BTreeMap` for deterministic artifacts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+    /// Linux-specific knobs (OCI `linux`).
+    #[serde(default)]
+    pub linux: Linux,
+    /// The Nix store view — the one **carve-out** (not OCI). `seeds` is a
+    /// build-time input; `resolved` is stamped by `resolve --graph`.
+    #[serde(default)]
+    pub closure: Closure,
+}
+
+/// The rootfs (OCI `root`). `path` is a sealed store path mounted at `/` and
+/// identity-bound at `/nix/store/<self>`; not `image` — a store-path rootfs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Root {
+    pub path: StorePath,
+    /// `root.readonly`. Absent → not emitted (a producer/`profiles.base` sets it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
+}
+
+/// The process (OCI `process`). Argv keeps the **execve** split (`executable` +
+/// `args`); `env` is a map and `capabilities` an add-list for ergonomics.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Process {
+    /// The program: a bare name (resolved via `env.PATH` in-sandbox) or an
+    /// absolute store path — `execve`'s `argv[0]`, validated against the closure.
+    pub executable: String,
+    /// The rest of argv.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Allocate a controlling terminal (OCI `process.terminal`); also drives the
+    /// host-side console relay.
+    #[serde(default)]
+    pub terminal: bool,
+    /// Run-as identity (verbatim OCI `process.user`). Absent → `uid 0/gid 0`.
+    /// `username` is inert on Linux; `umask`/`additionalGids` do act.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<User>,
+    /// Working directory (OCI `process.cwd`). Absent → `/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    /// Environment (OCI `process.env`, but a **map** here). `PATH` lives here and
+    /// is the single source of truth for `executable`.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// `process.capabilities` as an **add-list** (names without `CAP_`). `None` →
+    /// not emitted; `Some([])` → drop all; `Some([names])` → exactly those (the
+    /// engine puts each in every capability set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
+    /// `process.rlimits`, verbatim OCI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rlimits: Vec<PosixRlimit>,
     /// `process.noNewPrivileges`. Absent → not emitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_new_privileges: Option<bool>,
-    /// `process.capabilities`. `None` → not emitted (runtime default);
-    /// `Some([])` → **drop all**; `Some([names])` → exactly those (names without
-    /// the `CAP_` prefix, e.g. `NET_BIND_SERVICE`; the engine puts each in every
-    /// capability set).
+    /// `process.oomScoreAdj` — OOM-killer bias. Absent → not emitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<Vec<String>>,
-    /// `process.rlimits`, verbatim OCI (`{ type, soft, hard }`).
+    pub oom_score_adj: Option<i32>,
+}
+
+/// Linux-specific knobs (OCI `linux`). Every field is a faithful pass-through;
+/// `absent = absent`. The floor these carry comes from a producer, not the engine.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Linux {
+    /// `linux.namespaces`, verbatim OCI (`{ type, path? }`). A `path` **joins** an
+    /// existing namespace (host's, a pod peer's, a `pasta`/`slirp` netns); omit it
+    /// for a fresh private one. Absent → shares the host's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rlimits: Vec<PosixRlimit>,
-    /// `linux.maskedPaths` — paths hidden inside the sandbox (file → `/dev/null`,
-    /// dir → empty ro tmpfs). The curated list is a `profiles.base` concern.
+    pub namespaces: Vec<LinuxNamespace>,
+    /// `linux.uidMappings`. `host` may be `"self"` (the invoking user's id,
+    /// resolved at launch) or a concrete number.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uid_mappings: Vec<IdMapping>,
+    /// `linux.gidMappings`. Same `"self"`/numeric grammar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gid_mappings: Vec<IdMapping>,
+    /// `linux.maskedPaths` — paths hidden inside the sandbox.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub masked_paths: Vec<String>,
     /// `linux.readonlyPaths` — paths remounted read-only inside the sandbox.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readonly_paths: Vec<String>,
-    /// `linux.rootfsPropagation` (e.g. `rprivate`). Absent → not emitted.
+    /// `linux.rootfsPropagation` (e.g. `rprivate`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs_propagation: Option<String>,
-    /// `linux.namespaces`, verbatim OCI (`{ type, path? }`). A `path` **joins** an
-    /// existing namespace (host's, a pod peer's, or a `pasta`/`slirp4netns` netns
-    /// for rootless networking); omit it for a fresh private one. Absent → no
-    /// namespaces (the sandbox shares the host's — a producer supplies the set).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub namespaces: Vec<LinuxNamespace>,
-    /// `linux.uidMappings`. `host` may be `"self"` (the invoking user's uid,
-    /// resolved at launch — the host side of a rootless map isn't known until run
-    /// time) or a concrete number.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub uid_mappings: Vec<IdMapping>,
-    /// `linux.gidMappings`. Same `"self"`/numeric grammar as `uid_mappings`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub gid_mappings: Vec<IdMapping>,
-    /// `linux.seccomp`, verbatim OCI seccomp profile. The engine loads it as-is;
-    /// authoring/curating the profile is a producer (`profiles.base`) concern.
+    /// `linux.seccomp`, verbatim OCI. The engine loads it as-is; the curated
+    /// profile is a producer concern.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seccomp: Option<LinuxSeccomp>,
-    /// `linux.devices`, verbatim OCI. Realized via `linux.devices` (rootless binds
-    /// the host node — never a `mounts[]` char-device bind, which EINVALs; see
-    /// `main.rs`). No cgroup device allowlist (moot rootless).
+    /// `linux.devices`, verbatim OCI (rootless binds the node; no cgroup allowlist).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<LinuxDevice>,
-
-    // ── placements layered onto `root` ──
-    /// **Verbatim OCI mounts** (`{ destination, source, type, options, … }`) —
-    /// binds, tmpfs, idmapped mounts, *and overlays* (`type: "overlay"` with
-    /// `lowerdir`/`upperdir`/`workdir` in `options`). There is **no special mount
-    /// kind**: pass-through, the producer (CLI / Nix) owns every field. Each binds
-    /// onto a mountpoint `root` already baked. A relocated store path is a bind
-    /// whose source is `/nix/store/<x>`; an overlay over a store lower is an OCI
-    /// overlay whose `lowerdir` is a store path — in both cases, if the source's
-    /// closure must be bound, the producer adds it to `closure.seeds` (mounts
-    /// contribute nothing to the closure automatically).
-    #[serde(default)]
-    pub mounts: Vec<OciMount>,
+    /// `linux.resources`, verbatim OCI. Needs cgroup-v2 delegation to enforce
+    /// rootless — an unenforceable limit is crun's to reject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<LinuxResources>,
+    /// `linux.cgroupsPath`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroups_path: Option<PathBuf>,
+    /// `linux.sysctl` — namespaced sysctls only, rootless. `BTreeMap` for
+    /// deterministic artifacts; the producer only sets in-namespace-settable keys.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sysctl: BTreeMap<String, String>,
+    /// `linux.netDevices` — host netdevs to move into the sandbox netns.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub net_devices: BTreeMap<String, LinuxNetDevice>,
+    /// `linux.personality` — execution domain (e.g. `LINUX32`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<LinuxPersonality>,
 }
 
 /// The Nix store view: what the closure was traversed *from* (`seeds`, a
-/// build-time input) and — once built — what was locked *in* (`resolved`, stamped
-/// by `resolve --graph`). See `crate::resolve`.
+/// build-time input) and — once built — what was locked *in* (`resolved`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Closure {
     /// The seed store paths the closure is traversed *from* — a build-time input
-    /// (conventionally `root` plus any overlay-lower sources).
+    /// (conventionally `root.path` plus any overlay-lower sources).
     #[serde(default)]
     pub seeds: Vec<StorePath>,
-    /// The flat identity-bind set bound under `/nix/store`, canonically sorted,
-    /// the full closure of `seeds` including `root`. `Some` ⇒ built; `None` ⇒
-    /// unbuilt (`run` fails loud — build with `resolve --graph`).
+    /// The flat identity-bind set, canonically sorted, the full closure of
+    /// `seeds` including `root.path`. `Some` ⇒ built; `None` ⇒ unbuilt (`run`
+    /// fails loud — build with `resolve --graph`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<Vec<StorePath>>,
 }
 
 /// One `linux.{uid,gid}Mappings` entry: `container` id → `host` id, `size` wide.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdMapping {
     pub container: u32,
     pub host: HostId,
@@ -203,9 +237,9 @@ pub struct IdMapping {
 }
 
 /// The host side of an [`IdMapping`]: a concrete id, or `"self"` — the invoking
-/// user's id, resolved by the engine at launch. A build-time producer can't name
-/// the invoker's uid numerically, so `"self"` lets `profiles.base` express
-/// "map container-0 to whoever runs it" declaratively.
+/// user's id, resolved by the engine at launch. A build can't name the invoker's
+/// uid numerically, so `"self"` lets `profiles.base` declare the map at build
+/// time and keep it in the artifact.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostId {
     /// A concrete host uid/gid.
@@ -254,91 +288,86 @@ mod tests {
     }
 
     #[test]
-    fn unbuilt_spec_round_trips_with_pure_passthrough() {
-        // A hand-authored, profile-less spec: only the fields present, and the
-        // OCI pass-throughs absent (the engine will emit nothing for them).
+    fn unbuilt_spec_mirrors_oci_structure() {
+        // Nested like the OCI spec; only the fields present, pass-throughs absent.
         let json = r#"{
-            "root": "/nix/store/aaaa-base-env",
-            "executable": "bash",
-            "args": ["-l"],
-            "tty": true,
-            "environment": { "PATH": "/bin" },
+            "root": { "path": "/nix/store/aaaa-base-env" },
+            "process": { "executable": "bash", "args": ["-l"], "terminal": true,
+                         "env": { "PATH": "/bin" } },
             "mounts": [ { "destination": "/tmp", "type": "tmpfs", "options": ["nosuid","nodev"] } ],
             "closure": { "seeds": [ "/nix/store/aaaa-base-env" ] }
         }"#;
         let spec: Spec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.process.executable, "bash");
+        assert!(spec.process.terminal);
+        assert_eq!(spec.process.env.get("PATH").unwrap(), "/bin");
         assert_eq!(spec.closure.seeds.len(), 1);
         assert!(spec.closure.resolved.is_none());
-        // Absent = absent: no floor applied by the schema.
-        assert!(spec.read_only.is_none());
-        assert!(spec.no_new_privileges.is_none());
-        assert!(spec.capabilities.is_none());
-        assert!(spec.hostname.is_none());
-        assert!(spec.namespaces.is_empty());
-        assert!(spec.masked_paths.is_empty());
-        // Absent pass-throughs stay absent through a serialize round-trip.
+        // absent = absent, at every level.
+        assert!(spec.root.readonly.is_none());
+        assert!(spec.process.no_new_privileges.is_none());
+        assert!(spec.process.capabilities.is_none());
+        assert!(spec.linux.namespaces.is_empty());
         let back = serde_json::to_string(&spec).unwrap();
-        assert!(!back.contains("read_only"));
-        assert!(!back.contains("capabilities"));
+        assert!(!back.contains("readonly"));
         assert!(!back.contains("namespaces"));
-        let again: Spec = serde_json::from_str(&back).unwrap();
-        assert!(again.read_only.is_none());
     }
 
     #[test]
-    fn passthrough_fields_carry_a_composed_floor() {
-        // What `profiles.base` composes into a spec.
+    fn passthrough_floor_and_full_process_linux() {
         let json = r#"{
-            "root": "/nix/store/aaaa-r",
-            "executable": "bash",
-            "read_only": true,
-            "no_new_privileges": true,
-            "capabilities": [],
-            "rootfs_propagation": "rprivate",
-            "rlimits": [ { "type": "RLIMIT_CORE", "soft": 0, "hard": 0 } ],
-            "masked_paths": [ "/proc/kcore" ],
-            "readonly_paths": [ "/proc/sys" ],
-            "namespaces": [ { "type": "user" }, { "type": "mount" }, { "type": "network", "path": "/proc/9/ns/net" } ],
-            "uid_mappings": [ { "container": 0, "host": "self", "size": 1 } ],
-            "gid_mappings": [ { "container": 0, "host": 100, "size": 1 } ]
+            "root": { "path": "/nix/store/aaaa-r", "readonly": true },
+            "process": {
+                "executable": "bash", "no_new_privileges": true, "capabilities": [],
+                "oom_score_adj": -500,
+                "user": { "uid": 1000, "gid": 100, "umask": 18, "additionalGids": [5], "username": "dev" },
+                "rlimits": [ { "type": "RLIMIT_CORE", "soft": 0, "hard": 0 } ]
+            },
+            "linux": {
+                "rootfs_propagation": "rprivate",
+                "masked_paths": [ "/proc/kcore" ],
+                "namespaces": [ { "type": "user" }, { "type": "network", "path": "/proc/9/ns/net" } ],
+                "uid_mappings": [ { "container": 0, "host": "self", "size": 1 } ],
+                "gid_mappings": [ { "container": 0, "host": 100, "size": 1 } ],
+                "resources": { "memory": { "limit": 536870912 }, "pids": { "limit": 128 } },
+                "sysctl": { "net.ipv4.ip_forward": "0" }
+            },
+            "domainname": "box.local",
+            "annotations": { "org.pierogi/built": "test" }
         }"#;
         let spec: Spec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.read_only, Some(true));
-        assert_eq!(spec.capabilities.as_deref(), Some(&[][..])); // drop-all, not None
-        assert_eq!(spec.rlimits.len(), 1);
-        assert_eq!(spec.masked_paths, ["/proc/kcore"]);
-        // namespaces: two private + one join (path set).
-        assert_eq!(spec.namespaces.len(), 3);
-        assert!(spec.namespaces[0].path().is_none());
-        assert!(spec.namespaces[2].path().is_some());
-        // id-mapping host: "self" sentinel and a numeric.
-        assert_eq!(spec.uid_mappings[0].host, HostId::Invoker);
-        assert_eq!(spec.gid_mappings[0].host, HostId::Numeric(100));
+        assert_eq!(spec.root.readonly, Some(true));
+        assert_eq!(spec.process.capabilities.as_deref(), Some(&[][..])); // drop-all
+        assert_eq!(spec.process.oom_score_adj, Some(-500));
+        assert_eq!(spec.process.user.as_ref().unwrap().username().as_deref(), Some("dev"));
+        assert_eq!(spec.linux.masked_paths, ["/proc/kcore"]);
+        assert_eq!(spec.linux.namespaces.len(), 2);
+        assert!(spec.linux.namespaces[1].path().is_some());
+        assert_eq!(spec.linux.uid_mappings[0].host, HostId::Invoker);
+        assert_eq!(spec.linux.gid_mappings[0].host, HostId::Numeric(100));
+        assert!(spec.linux.resources.is_some());
+        assert_eq!(spec.linux.sysctl.get("net.ipv4.ip_forward").unwrap(), "0");
+        assert_eq!(spec.domainname.as_deref(), Some("box.local"));
         // round-trips (self stays "self", drop-all stays []).
         let back = serde_json::to_string(&spec).unwrap();
         assert!(back.contains(r#""host":"self""#));
-        assert!(back.contains(r#""capabilities":[]"#));
         let _again: Spec = serde_json::from_str(&back).unwrap();
+    }
+
+    #[test]
+    fn unknown_field_is_rejected_at_every_level() {
+        // deny_unknown_fields: an unmodeled OCI field fails loud, not silently.
+        let top = r#"{ "root": {"path":"/nix/store/a"}, "process": {"executable":"b"}, "resourcez": {} }"#;
+        assert!(serde_json::from_str::<Spec>(top).is_err());
+        let proc = r#"{ "root": {"path":"/nix/store/a"}, "process": {"executable":"b","scheduler":{}} }"#;
+        assert!(serde_json::from_str::<Spec>(proc).is_err());
+        let lin = r#"{ "root": {"path":"/nix/store/a"}, "process": {"executable":"b"}, "linux": {"intelRdt":{}} }"#;
+        assert!(serde_json::from_str::<Spec>(lin).is_err());
     }
 
     #[test]
     fn id_mapping_host_rejects_bogus_string() {
         let json = r#"{ "container": 0, "host": "root", "size": 1 }"#;
         assert!(serde_json::from_str::<IdMapping>(json).is_err());
-    }
-
-    #[test]
-    fn closure_round_trips_as_seeds_and_resolved() {
-        let json = r#"{
-            "root": "/nix/store/aaaa-base-env",
-            "executable": "bash",
-            "closure": {
-                "seeds": [ "/nix/store/aaaa-base-env" ],
-                "resolved": [ "/nix/store/0000-bash", "/nix/store/1111-glibc" ]
-            }
-        }"#;
-        let spec: Spec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.closure.seeds.len(), 1);
-        assert_eq!(spec.closure.resolved.as_ref().unwrap().len(), 2);
     }
 }
