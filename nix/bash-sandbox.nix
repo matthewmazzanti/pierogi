@@ -82,17 +82,18 @@ let
   # tools, tree, ncurses+terminfo) — shared with the foot sandbox.
   terminalTools = import ./terminal-tools.nix { inherit pkgs; };
 
+  # Light-touch resolution utilities (store-mount baking shell + `resolveSpec`).
+  lib = import ./lib.nix { inherit pkgs pierogi; };
+
   # The runtime deps — root's references. `root` itself is NOT here: it doesn't
   # exist yet, and seeding from it would be circular. These are all buildable
   # before `root`, so they drive the baked dep-mountpoint tree.
   deps = terminalTools ++ [ etcPasswd etcGroup etcHostname etcBashrc ];
 
-  # The supplied closure of the deps — for baking dep mountpoints only.
-  depsClosure = pkgs.closureInfo { rootPaths = deps; };
-
   # root: the sealed rootfs. A symlink farm for /bin, hand-rolled /etc, and every
   # mountpoint baked in — no launch-time scaffold.
   root = pkgs.runCommand "pierogi-bash-root" { } ''
+    source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
     # /bin symlink farm (buildEnv-style, but we need the same derivation to bake
@@ -121,31 +122,11 @@ let
     # is frozen at build time.
     mkdir -p $out/proc $out/dev $out/tmp $out/home/pierogi $out/root
 
-    # One /nix/store/<hash> mountpoint per closure member, for the identity
-    # binds. The mountpoint kind must match the source: a *file* store path
-    # (e.g. a `writeText` /etc file) binds onto a file, a directory onto a
-    # directory — this is the file-vs-dir logic that used to run at launch in
-    # `scaffold_mountpoints`, now frozen into the image. The closure paths are
-    # realized in the build sandbox (closureInfo pulls them in), so we can stat
-    # them here. (Directory/file *names* aren't scanned as store references, so
-    # these add no closure refs to `root` — its refs come from the /bin and /etc
-    # symlink targets, which are exactly `deps`.)
-    mkdir -p $out/nix/store
-    while read -r p; do
-      if [ -d "$p" ]; then
-        mkdir -p "$out$p"
-      else
-        mkdir -p "$(dirname "$out$p")"
-        touch "$out$p"
-      fi
-    done < ${depsClosure}/store-paths
-
-    # `root`'s OWN identity mountpoint. `$out` is fixed before this builder runs
-    # (input-addressed), so we know root's store path here — no circularity. This
-    # is what lets `root` be identity-bound at /nix/store/<self> at launch, so an
-    # absolute reference into root (e.g. a `/nix/store/<root>/bin` PATH or a
-    # self-referential symlink) resolves — while root is also the `/` mount.
-    mkdir -p "$out/nix/store/$(basename "$out")"
+    # The /nix/store/<hash> mountpoints (one per closure member, kind matching
+    # the source) + root's own /nix/store/<self> identity mountpoint. See
+    # `bake_store_mounts` in build-lib.sh. `deps` is root's references (not root
+    # itself — circular), so their closure is exactly what root needs bound.
+    bake_store_mounts ${lib.storePaths deps}
   '';
 
   # The default-closed floor, as spec fields — the engine holds no policy, so
@@ -194,31 +175,18 @@ let
       # Writable scratch onto the baked /tmp mountpoint.
       { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
     ];
-    # Seeds: the store paths pierogi traverses the reference graph from. Here
-    # just `root` (its closure covers bash/coreutils/etc). A producer declares
-    # these; an overlay lower would be added alongside root.
-    closure.seeds = [ "${root}" ];
+    # `closure.seeds` is injected by `resolveSpec` from its `seeds` arg (below),
+    # so the graphed roots and the spec's seeds can't drift.
   };
-  unresolvedSpecFile =
-    pkgs.writeText "spec.unresolved.json" (builtins.toJSON unresolvedSpec);
 
-  # Build: hand pierogi the reference graph of `root` and let it traverse from
-  # the spec's seeds. `__structuredAttrs` + `exportReferencesGraph.closure =
-  # [root]` makes Nix expand the full graph as the top-level `closure` array of
-  # `$NIX_ATTRS_JSON_FILE` (the same shape `closureInfo` reads: one
-  # `{ path, references, ... }` per closure member); pierogi ignores the rest of
-  # the attrs. The spec already carries `closure.seeds = [root]` (set above), so
-  # `resolve` traverses from those and stamps `closure.resolved = closure(root)`.
-  # Building this also realizes the rootfs and its whole closure into the store,
-  # so every bind the spec names is present.
-  resolved = pkgs.runCommand "pierogi-bash-sandbox.json"
-    {
-      __structuredAttrs = true;
-      exportReferencesGraph.closure = [ root ];
-    } ''
-    ${pierogi}/bin/pierogi resolve ${unresolvedSpecFile} \
-      --graph "$NIX_ATTRS_JSON_FILE" > "''${outputs[out]}"
-  '';
+  # Build: traverse root's reference graph from the seeds and stamp
+  # `closure.resolved`. `seeds = [ root ]` (its closure covers bash/coreutils/etc);
+  # an overlay lower would be added alongside. See `lib.resolveSpec`.
+  resolved = lib.resolveSpec {
+    name = "pierogi-bash-sandbox";
+    spec = unresolvedSpec;
+    seeds = [ root ];
+  };
 
 in
 {

@@ -38,12 +38,13 @@ let
   # libwayland + its closure.
   deps = [ pkgs.wayland-utils etcHostname ];
 
-  # The supplied closure of the deps — for baking dep mountpoints only.
-  depsClosure = pkgs.closureInfo { rootPaths = deps; };
+  # Light-touch resolution utilities (store-mount baking shell + `resolveSpec`).
+  lib = import ./lib.nix { inherit pkgs pierogi; };
 
   # root: the sealed rootfs — a /bin symlink farm, hand-rolled /etc, and every
   # mountpoint baked in (incl. the Wayland socket file). No launch-time scaffold.
   root = pkgs.runCommand "pierogi-wayland-root" { } ''
+    source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
     # /bin symlink farm — absolute targets into /nix/store, resolved inside the
@@ -65,23 +66,9 @@ let
     mkdir -p $out/proc $out/dev $out/tmp $out/run/user/1000
     touch $out/run/user/1000/wayland-0
 
-    # One /nix/store/<hash> mountpoint per closure member, for the identity
-    # binds. Kind must match the source (file→file, dir→dir); the closure paths
-    # are realized in the build sandbox, so we can stat them here.
-    mkdir -p $out/nix/store
-    while read -r p; do
-      if [ -d "$p" ]; then
-        mkdir -p "$out$p"
-      else
-        mkdir -p "$(dirname "$out$p")"
-        touch "$out$p"
-      fi
-    done < ${depsClosure}/store-paths
-
-    # `root`'s OWN identity mountpoint ($out is input-addressed, fixed before the
-    # builder runs — no circularity), so root is identity-bound at
-    # /nix/store/<self> while also being the `/` mount.
-    mkdir -p "$out/nix/store/$(basename "$out")"
+    # The /nix/store/<hash> mountpoints (kind matches source) + root's own
+    # /nix/store/<self> identity mountpoint. See `bake_store_mounts` in build-lib.sh.
+    bake_store_mounts ${lib.storePaths deps}
   '';
 
   # The default-closed floor, as spec fields (see nix/profiles.nix).
@@ -114,24 +101,16 @@ let
       # Writable scratch onto the baked /tmp mountpoint.
       { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
     ];
-    # Seeds: the store paths pierogi traverses the reference graph from. Just
-    # `root` (its closure covers wayland-utils/etc).
-    closure.seeds = [ "${root}" ];
+    # `closure.seeds` is injected by `resolveSpec` from its `seeds` arg (below).
   };
-  unresolvedSpecFile =
-    pkgs.writeText "spec.unresolved.json" (builtins.toJSON unresolvedSpec);
 
-  # Build: hand pierogi the reference graph of `root` and traverse from the
-  # spec's seeds to stamp `closure.resolved`. See `bash-sandbox.nix` for the
-  # `__structuredAttrs` + `exportReferencesGraph` details.
-  resolved = pkgs.runCommand "pierogi-wayland-sandbox.json"
-    {
-      __structuredAttrs = true;
-      exportReferencesGraph.closure = [ root ];
-    } ''
-    ${pierogi}/bin/pierogi resolve ${unresolvedSpecFile} \
-      --graph "$NIX_ATTRS_JSON_FILE" > "''${outputs[out]}"
-  '';
+  # Build: traverse root's reference graph from the seeds and stamp
+  # `closure.resolved`. See `lib.resolveSpec` / bash-sandbox.nix.
+  resolved = lib.resolveSpec {
+    name = "pierogi-wayland-sandbox";
+    spec = unresolvedSpec;
+    seeds = [ root ];
+  };
 
 in
 {

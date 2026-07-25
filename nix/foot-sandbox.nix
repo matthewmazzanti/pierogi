@@ -86,12 +86,13 @@ let
     etcBashrc
   ];
 
-  # The supplied closure of the deps — for baking dep mountpoints only.
-  depsClosure = pkgs.closureInfo { rootPaths = deps; };
+  # Light-touch resolution utilities (store-mount baking shell + `resolveSpec`).
+  lib = import ./lib.nix { inherit pkgs pierogi; };
 
   # root: the sealed rootfs — /bin farm, hand-rolled /etc, baked mountpoints
   # (incl. the Wayland socket file). No launch-time scaffold.
   root = pkgs.runCommand "pierogi-foot-root" { } ''
+    source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
     # /bin symlink farm — the shared terminal userland plus foot itself.
@@ -117,19 +118,9 @@ let
     mkdir -p $out/proc $out/dev $out/tmp $out/home/pierogi $out/root $out/run/user/1000
     touch $out/run/user/1000/wayland-0
 
-    # One /nix/store/<hash> mountpoint per closure member (kind matches source).
-    mkdir -p $out/nix/store
-    while read -r p; do
-      if [ -d "$p" ]; then
-        mkdir -p "$out$p"
-      else
-        mkdir -p "$(dirname "$out$p")"
-        touch "$out$p"
-      fi
-    done < ${depsClosure}/store-paths
-
-    # root's OWN identity mountpoint ($out is input-addressed — no circularity).
-    mkdir -p "$out/nix/store/$(basename "$out")"
+    # The /nix/store/<hash> mountpoints (kind matches source) + root's own
+    # /nix/store/<self> identity mountpoint. See `bake_store_mounts` in build-lib.sh.
+    bake_store_mounts ${lib.storePaths deps}
   '';
 
   # The default-closed floor, as spec fields (see nix/profiles.nix).
@@ -187,21 +178,16 @@ let
         options = [ "nosuid" "noexec" "newinstance" "ptmxmode=0666" "mode=0620" ];
       }
     ];
-    closure.seeds = [ "${root}" ];
+    # `closure.seeds` is injected by `resolveSpec` from its `seeds` arg (below).
   };
-  unresolvedSpecFile =
-    pkgs.writeText "spec.unresolved.json" (builtins.toJSON unresolvedSpec);
 
-  # Build: traverse root's reference graph from the spec's seeds to stamp
-  # `closure.resolved` (see bash-sandbox.nix for the structuredAttrs details).
-  resolved = pkgs.runCommand "pierogi-foot-sandbox.json"
-    {
-      __structuredAttrs = true;
-      exportReferencesGraph.closure = [ root ];
-    } ''
-    ${pierogi}/bin/pierogi resolve ${unresolvedSpecFile} \
-      --graph "$NIX_ATTRS_JSON_FILE" > "''${outputs[out]}"
-  '';
+  # Build: traverse root's reference graph from the seeds and stamp
+  # `closure.resolved`. See `lib.resolveSpec` / bash-sandbox.nix.
+  resolved = lib.resolveSpec {
+    name = "pierogi-foot-sandbox";
+    spec = unresolvedSpec;
+    seeds = [ root ];
+  };
 
 in
 {
