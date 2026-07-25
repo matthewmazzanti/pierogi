@@ -56,9 +56,10 @@ let
     # resolves in-sandbox and folds into `root`'s references).
     ln -s ${etcHostname} $out/etc/hostname
 
-    # Baked mountpoints — the frozen skeleton the runtime mounts onto. `/proc`
-    # and `/dev` are base mounts; `/tmp` takes the tmpfs below. `/run/user/1000`
-    # + the `wayland-0` **file** are the Wayland socket's bind target: a socket
+    # Baked mountpoints — the frozen skeleton the runtime mounts onto. `/proc`,
+    # `/dev`, and `/tmp` are all producer mounts (spec.mounts, below).
+    # `/run/user/1000` + the `wayland-0` **file** are the
+    # Wayland socket's bind target: a socket
     # binds onto a file, so it's `touch`ed, not `mkdir`ed. A read-only rootfs
     # can't grow these at launch — that's the whole point of baking them.
     mkdir -p $out/proc $out/dev $out/tmp $out/run/user/1000
@@ -103,8 +104,14 @@ let
         WAYLAND_DISPLAY = "wayland-0";
       };
     };
-    # Writable scratch onto the baked /tmp mountpoint — a verbatim OCI mount.
+    # Placements — verbatim OCI mounts.
     mounts = [
+      # /proc + /dev tmpfs — lifted out of the engine's base mounts into the
+      # producer layer (see bash-sandbox.nix / docs/control-surface.md). /dev
+      # takes no `nodev` — device nodes live there.
+      { destination = "/proc"; type = "proc"; source = "proc"; }
+      { destination = "/dev"; type = "tmpfs"; source = "tmpfs"; options = [ "nosuid" "strictatime" "mode=755" "size=65536k" ]; }
+      # Writable scratch onto the baked /tmp mountpoint.
       { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
     ];
     # Seeds: the store paths pierogi traverses the reference graph from. Just

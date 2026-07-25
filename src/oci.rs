@@ -79,11 +79,12 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
     linux.set_net_devices(non_empty_map(lin.net_devices.clone()));
     linux.set_personality(lin.personality.clone());
 
-    // ── mounts: engine-essential base, then closure binds, then placements ──
-    let mut mounts = base_mounts()?;
-    if proc.terminal {
-        mounts.push(devpts_mount()?);
-    }
+    // ── mounts: closure binds, then placements, then the terminal devpts ──
+    // The engine injects no base mounts of its own now — `/proc`, `/dev`, and its
+    // `/dev/pts` are all producer placements (spec.mounts), composed from the Nix
+    // profile layer. The only engine-added mounts are the closure identity binds
+    // (a nix mechanism, below) and, for a `terminal`, the console's devpts.
+    let mut mounts: Vec<OciMount> = Vec::new();
     // Closure identity binds: ro,nosuid,nodev — a mechanism constant (the store is
     // immutable and holds no device nodes), never a producer knob.
     let closure_opts: Vec<String> = ["bind", "ro", "nosuid", "nodev"]
@@ -95,10 +96,19 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
         mounts.push(bind_mount(&p, &p, &closure_opts)?);
     }
     // Placements: verbatim OCI mounts pass straight through (the producer owns
-    // every field — binds, tmpfs, overlays, idmapped mounts alike). If crun can't
-    // realize one (e.g. rootless overlayfs on an old kernel), it fails loud at
-    // launch — the runtime's concern, not an engine opinion.
+    // every field — binds, tmpfs, overlays, idmapped mounts alike). /proc and the
+    // /dev tmpfs are among these now — lifted out of the engine's base mounts into
+    // the producer layer. If crun can't realize one (e.g. rootless overlayfs on an
+    // old kernel), it fails loud at launch — the runtime's concern, not an engine opinion.
     mounts.extend(spec.mounts.iter().cloned());
+    // A `terminal` console allocates its pty from a devpts, which mounts onto the
+    // /dev tmpfs — now a producer placement (above). So the devpts is appended
+    // *after* the placements, guaranteeing the producer's /dev is mounted first.
+    // (foot runs the pump-less path with `terminal = false` and declares its own
+    // devpts as a placement.)
+    if proc.terminal {
+        mounts.push(devpts_mount()?);
+    }
 
     // ── process: always-set fields, then the pass-throughs via setters ──
     // Run-as identity: the producer's `user` verbatim, or uid 0/gid 0 by default.
@@ -215,27 +225,6 @@ fn parse_cap(name: &str) -> Result<Capability> {
     let upper = name.trim().to_uppercase();
     let bare = upper.strip_prefix("CAP_").unwrap_or(&upper);
     Capability::from_str(bare).map_err(|_| anyhow::anyhow!("unknown capability {name:?}"))
-}
-
-fn base_mounts() -> Result<Vec<OciMount>> {
-    Ok(vec![
-        MountBuilder::default()
-            .destination(PathBuf::from("/proc"))
-            .source(PathBuf::from("proc"))
-            .typ("proc".to_string())
-            .build()?,
-        MountBuilder::default()
-            .destination(PathBuf::from("/dev"))
-            .source(PathBuf::from("tmpfs"))
-            .typ("tmpfs".to_string())
-            .options(vec![
-                "nosuid".into(),
-                "strictatime".into(),
-                "mode=755".into(),
-                "size=65536k".into(),
-            ])
-            .build()?,
-    ])
 }
 
 fn devpts_mount() -> Result<OciMount> {
@@ -451,5 +440,64 @@ mod tests {
             m.options().as_ref().unwrap(),
             &["bind", "rw", "nosuid", "nodev"]
         );
+    }
+
+    #[test]
+    fn engine_injects_no_base_mounts() {
+        // /proc and /dev are both producer placements now. A bare spec (no
+        // placements, no terminal) yields only the closure identity binds — the
+        // engine mounts nothing of its own.
+        let spec = bare_resolved_spec();
+        let oci = build_spec(&RealizeInputs {
+            spec: &spec,
+            uid: 1,
+            gid: 1,
+        })
+        .unwrap();
+        let mounts = oci.mounts().as_ref().unwrap();
+        assert!(
+            mounts
+                .iter()
+                .all(|m| m.destination().starts_with("/nix/store")),
+            "only closure binds; the engine adds no /proc or /dev"
+        );
+    }
+
+    #[test]
+    fn dev_is_a_placement_and_terminal_devpts_follows_it() {
+        // /dev is no longer engine-injected. A terminal spec's devpts is appended
+        // AFTER the placements, so a producer /dev tmpfs (a placement) is mounted
+        // before the devpts that sits on it.
+        let mut spec = bare_resolved_spec();
+        spec.process.terminal = true;
+        spec.mounts = vec![MountBuilder::default()
+            .destination(PathBuf::from("/dev"))
+            .source(PathBuf::from("tmpfs"))
+            .typ("tmpfs".to_string())
+            .options(vec!["nosuid".into(), "mode=755".into()])
+            .build()
+            .unwrap()];
+        let oci = build_spec(&RealizeInputs {
+            spec: &spec,
+            uid: 1,
+            gid: 1,
+        })
+        .unwrap();
+        let mounts = oci.mounts().as_ref().unwrap();
+        // Exactly one /dev — the producer's; the engine adds none.
+        let dev_count = mounts
+            .iter()
+            .filter(|m| m.destination() == &PathBuf::from("/dev"))
+            .count();
+        assert_eq!(dev_count, 1, "only the producer's /dev, none from the engine");
+        let dev_i = mounts
+            .iter()
+            .position(|m| m.destination() == &PathBuf::from("/dev"))
+            .unwrap();
+        let pts_i = mounts
+            .iter()
+            .position(|m| m.destination() == &PathBuf::from("/dev/pts"))
+            .expect("terminal spec emits a devpts");
+        assert!(dev_i < pts_i, "the /dev tmpfs must precede the terminal devpts");
     }
 }

@@ -180,9 +180,18 @@ let
         LANG = "C.UTF-8";
       };
     };
-    # Writable scratch onto the baked /tmp mountpoint — a verbatim OCI mount
-    # (destination/type/options), producer-owned options and all.
+    # Placements — verbatim OCI mounts, producer-owned options and all.
     mounts = [
+      # /proc — lifted out of the engine's base mounts into the producer layer
+      # (see docs/control-surface.md). The masked/readonly paths in profiles.base
+      # narrow it; crun applies those after the mount.
+      { destination = "/proc"; type = "proc"; source = "proc"; }
+      # /dev tmpfs — lifted out of the engine's base mounts into the producer
+      # layer. A fresh, writable /dev the runtime populates (standard device
+      # nodes; crun's /dev/console + /dev/ptmx for a `terminal`). No `nodev` —
+      # device nodes live here. Ahead of any devpts mounted onto it.
+      { destination = "/dev"; type = "tmpfs"; source = "tmpfs"; options = [ "nosuid" "strictatime" "mode=755" "size=65536k" ]; }
+      # Writable scratch onto the baked /tmp mountpoint.
       { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
     ];
     # Seeds: the store paths pierogi traverses the reference graph from. Here

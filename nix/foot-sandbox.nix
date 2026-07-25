@@ -111,9 +111,9 @@ let
     ln -s ${fontsConf}   $out/etc/fonts.conf
     ln -s ${pkgs.ncurses}/share/terminfo $out/etc/terminfo
 
-    # Baked mountpoints. `/proc` + `/dev` are base mounts; `/tmp` takes the
-    # tmpfs (also fontconfig's cachedir); `/run/user/1000` + the `wayland-0`
-    # **file** are the socket bind target (a socket binds onto a file).
+    # Baked mountpoints. `/proc`, `/dev`, and `/tmp` are all producer mounts
+    # (spec.mounts; `/tmp` also fontconfig's cachedir); `/run/user/1000` + the
+    # `wayland-0` **file** are the socket bind target (a socket binds onto a file).
     mkdir -p $out/proc $out/dev $out/tmp $out/home/pierogi $out/root $out/run/user/1000
     touch $out/run/user/1000/wayland-0
 
@@ -173,6 +173,12 @@ let
     # mounts it onto the /dev tmpfs and wires up /dev/ptmx (matches the options
     # the engine's own `devpts_mount()` uses).
     mounts = [
+      # /proc + /dev tmpfs — lifted out of the engine's base mounts into the
+      # producer layer (see bash-sandbox.nix / docs/control-surface.md). /dev
+      # takes no `nodev` — device nodes live there — and precedes the devpts
+      # below, which mounts onto it.
+      { destination = "/proc"; type = "proc"; source = "proc"; }
+      { destination = "/dev"; type = "tmpfs"; source = "tmpfs"; options = [ "nosuid" "strictatime" "mode=755" "size=65536k" ]; }
       { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
       {
         destination = "/dev/pts";
