@@ -57,13 +57,11 @@ let
     # resolves in-sandbox and folds into `root`'s references).
     ln -s ${etcHostname} $out/etc/hostname
 
-    # Baked mountpoints — the frozen skeleton the runtime mounts onto. `/proc`,
-    # `/dev`, and `/tmp` are all producer mounts (spec.mounts, below).
-    # `/run/user/1000` + the `wayland-0` **file** are the
-    # Wayland socket's bind target: a socket
-    # binds onto a file, so it's `touch`ed, not `mkdir`ed. A read-only rootfs
-    # can't grow these at launch — that's the whole point of baking them.
-    mkdir -p $out/proc $out/dev $out/tmp $out/run/user/1000
+    # Baked mountpoints — the base trio's dirs (proc/dev/tmp) + the
+    # `/run/user/1000` Wayland socket dir. The `wayland-0` **file** is the
+    # socket's bind target (a socket binds onto a file), so it's `touch`ed, not a
+    # dir. The read-only rootfs can't grow these at launch — hence baking them.
+    bake_dirs ${toString lib.defaultMountDirs} /run/user/1000
     touch $out/run/user/1000/wayland-0
 
     # The /nix/store/<hash> mountpoints (kind matches source) + root's own
@@ -91,16 +89,9 @@ let
         WAYLAND_DISPLAY = "wayland-0";
       };
     };
-    # Placements — verbatim OCI mounts.
-    mounts = [
-      # /proc + /dev tmpfs — lifted out of the engine's base mounts into the
-      # producer layer (see bash-sandbox.nix / docs/control-surface.md). /dev
-      # takes no `nodev` — device nodes live there.
-      { destination = "/proc"; type = "proc"; source = "proc"; }
-      { destination = "/dev"; type = "tmpfs"; source = "tmpfs"; options = [ "nosuid" "strictatime" "mode=755" "size=65536k" ]; }
-      # Writable scratch onto the baked /tmp mountpoint.
-      { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
-    ];
+    # Placements — the common base trio (proc/dev/tmp), lifted out of the engine
+    # into the producer layer (see nix/lib.nix). Verbatim OCI mounts.
+    mounts = lib.defaultMounts;
     # `closure.seeds` is injected by `resolveSpec` from its `seeds` arg (below).
   };
 

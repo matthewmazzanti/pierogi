@@ -27,6 +27,44 @@ rec {
   # never touches `closureInfo`.
   storePaths = deps: "${pkgs.closureInfo { rootPaths = deps; }}/store-paths";
 
+  # The producer-lifted base mounts, as individual named OCI mount entries —
+  # decomposed so a sandbox takes exactly what it needs. `/proc`, `/dev`, and
+  # `/tmp` were lifted out of the engine (see docs/control-surface.md); each is
+  # a verbatim OCI mount the engine passes straight through. `/dev` carries no
+  # `nodev` (device nodes live there); `devpts` is a foot-style extra (the engine
+  # auto-adds one only for `terminal`).
+  mounts = {
+    proc = { destination = "/proc"; type = "proc"; source = "proc"; };
+    dev = {
+      destination = "/dev";
+      type = "tmpfs";
+      source = "tmpfs";
+      options = [ "nosuid" "strictatime" "mode=755" "size=65536k" ];
+    };
+    tmp = {
+      destination = "/tmp";
+      type = "tmpfs";
+      options = [ "nosuid" "nodev" "mode=1777" ];
+    };
+    devpts = {
+      destination = "/dev/pts";
+      type = "devpts";
+      source = "devpts";
+      options = [ "nosuid" "noexec" "newinstance" "ptmxmode=0666" "mode=0620" ];
+    };
+  };
+
+  # The common trio every sandbox mounts, as a ready-to-use list (bundle sugar
+  # over `mounts`). All three bind onto the read-only rootfs, so each needs a
+  # baked mountpoint dir — hence `defaultMountDirs`, the paired input to
+  # `bake_dirs`. (devpts is deliberately NOT here: it mounts onto the /dev tmpfs
+  # at runtime, needs no baked dir, and only some sandboxes want it.)
+  defaultMounts = [ mounts.proc mounts.dev mounts.tmp ];
+
+  # The mountpoint dirs `defaultMounts` need baked — their destinations. One
+  # source of truth: derive from the mounts so the two can't drift.
+  defaultMountDirs = map (m: m.destination) defaultMounts;
+
   # Resolve an unresolved spec attrset into the built `spec.json`.
   #
   # `seeds` (a list of derivations / store paths) drives BOTH sides of the

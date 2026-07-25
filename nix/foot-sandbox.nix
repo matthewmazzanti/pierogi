@@ -112,10 +112,11 @@ let
     ln -s ${fontsConf}   $out/etc/fonts.conf
     ln -s ${pkgs.ncurses}/share/terminfo $out/etc/terminfo
 
-    # Baked mountpoints. `/proc`, `/dev`, and `/tmp` are all producer mounts
-    # (spec.mounts; `/tmp` also fontconfig's cachedir); `/run/user/1000` + the
-    # `wayland-0` **file** are the socket bind target (a socket binds onto a file).
-    mkdir -p $out/proc $out/dev $out/tmp $out/home/pierogi $out/root $out/run/user/1000
+    # Baked mountpoints — the base trio's dirs (proc/dev/tmp; `/tmp` also
+    # fontconfig's cachedir) + this sandbox's own (/home/pierogi, /root, and the
+    # `/run/user/1000` Wayland socket dir). The `wayland-0` **file** is the socket
+    # bind target (a socket binds onto a file), so it's `touch`ed, not a dir.
+    bake_dirs ${toString lib.defaultMountDirs} /home/pierogi /root /run/user/1000
     touch $out/run/user/1000/wayland-0
 
     # The /nix/store/<hash> mountpoints (kind matches source) + root's own
@@ -156,28 +157,12 @@ let
         WAYLAND_DISPLAY = "wayland-0";
       };
     };
-    # Placements — verbatim OCI mounts, straight through. Writable /tmp scratch
-    # (also the fontconfig cache), and a **devpts** so foot can allocate its own
-    # pty for the child shell. The engine auto-mounts devpts only for `terminal`
-    # (its console pump); foot runs the pump-less path (`terminal = false`), so it
-    # declares the devpts itself — plain producer policy, no engine knob. crun
-    # mounts it onto the /dev tmpfs and wires up /dev/ptmx (matches the options
-    # the engine's own `devpts_mount()` uses).
-    mounts = [
-      # /proc + /dev tmpfs — lifted out of the engine's base mounts into the
-      # producer layer (see bash-sandbox.nix / docs/control-surface.md). /dev
-      # takes no `nodev` — device nodes live there — and precedes the devpts
-      # below, which mounts onto it.
-      { destination = "/proc"; type = "proc"; source = "proc"; }
-      { destination = "/dev"; type = "tmpfs"; source = "tmpfs"; options = [ "nosuid" "strictatime" "mode=755" "size=65536k" ]; }
-      { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
-      {
-        destination = "/dev/pts";
-        type = "devpts";
-        source = "devpts";
-        options = [ "nosuid" "noexec" "newinstance" "ptmxmode=0666" "mode=0620" ];
-      }
-    ];
+    # Placements — the common base trio (proc/dev/tmp; `/tmp` also the fontconfig
+    # cache) plus a **devpts** so foot can allocate its own pty for the child
+    # shell. The engine auto-mounts a devpts only for `terminal` (its console
+    # pump); foot runs the pump-less path (`terminal = false`), so it declares
+    # one itself — `lib.mounts.devpts`, after `/dev` (which it mounts onto).
+    mounts = lib.defaultMounts ++ [ lib.mounts.devpts ];
     # `closure.seeds` is injected by `resolveSpec` from its `seeds` arg (below).
   };
 

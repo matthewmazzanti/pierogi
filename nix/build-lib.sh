@@ -30,3 +30,17 @@ bake_store_mounts() {
   done < "$store_paths"
   mkdir -p "$out/nix/store/$(basename "$out")"
 }
+
+# bake_dirs <dir>...
+#
+# Bake a mountpoint directory under `$out` for each arg (an absolute in-sandbox
+# path like `/proc` or `/home/pierogi`). The read-only rootfs can't grow these
+# at launch, so every mount's target has to be frozen into the image here. Pair
+# this with the mounts the spec declares — a mount whose target isn't baked
+# fails at launch. (A mount onto a writable tmpfs — e.g. `/dev/pts` onto the
+# `/dev` tmpfs — is the exception: it's created at runtime, so it needs no dir.)
+bake_dirs() {
+  for d in "$@"; do
+    mkdir -p "$out$d"
+  done
+}

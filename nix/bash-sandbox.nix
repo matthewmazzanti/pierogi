@@ -116,11 +116,10 @@ let
     # The terminfo DB, so TERM (xterm-256color) resolves for less/clear/tput/etc.
     ln -s ${pkgs.ncurses}/share/terminfo $out/etc/terminfo
 
-    # Baked mountpoints — the skeleton the runtime mounts onto. Directories only;
-    # the runtime overlays proc/tmpfs/binds here at launch. A read-only rootfs
-    # cannot grow these at runtime, which is the whole point: the mount topology
-    # is frozen at build time.
-    mkdir -p $out/proc $out/dev $out/tmp $out/home/pierogi $out/root
+    # Baked mountpoints — the base trio's dirs (proc/dev/tmp) + this sandbox's
+    # own (/home/pierogi, /root). See `bake_dirs` in build-lib.sh; the read-only
+    # rootfs can't grow these at launch, so the mount topology is frozen here.
+    bake_dirs ${toString lib.defaultMountDirs} /home/pierogi /root
 
     # The /nix/store/<hash> mountpoints (one per closure member, kind matching
     # the source) + root's own /nix/store/<self> identity mountpoint. See
@@ -161,20 +160,10 @@ let
         LANG = "C.UTF-8";
       };
     };
-    # Placements — verbatim OCI mounts, producer-owned options and all.
-    mounts = [
-      # /proc — lifted out of the engine's base mounts into the producer layer
-      # (see docs/control-surface.md). The masked/readonly paths in profiles.base
-      # narrow it; crun applies those after the mount.
-      { destination = "/proc"; type = "proc"; source = "proc"; }
-      # /dev tmpfs — lifted out of the engine's base mounts into the producer
-      # layer. A fresh, writable /dev the runtime populates (standard device
-      # nodes; crun's /dev/console + /dev/ptmx for a `terminal`). No `nodev` —
-      # device nodes live here. Ahead of any devpts mounted onto it.
-      { destination = "/dev"; type = "tmpfs"; source = "tmpfs"; options = [ "nosuid" "strictatime" "mode=755" "size=65536k" ]; }
-      # Writable scratch onto the baked /tmp mountpoint.
-      { destination = "/tmp"; type = "tmpfs"; options = [ "nosuid" "nodev" "mode=1777" ]; }
-    ];
+    # Placements — the common base trio (proc/dev/tmp), lifted out of the engine
+    # into the producer layer (see nix/lib.nix). Verbatim OCI mounts. The engine
+    # appends the `terminal` devpts after these.
+    mounts = lib.defaultMounts;
     # `closure.seeds` is injected by `resolveSpec` from its `seeds` arg (below),
     # so the graphed roots and the spec's seeds can't drift.
   };
