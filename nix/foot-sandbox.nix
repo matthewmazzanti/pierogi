@@ -73,25 +73,15 @@ let
   # is needed.
   terminalTools = import ./terminal-tools.nix { inherit pkgs; };
 
-  # The runtime deps — root's references. `root` itself is NOT here (circular).
-  # closureInfo folds in each dep's own closure, so `fontsConf` drags in
-  # `dejavuFonts` for the baked mountpoints even though it's also listed.
-  deps = terminalTools ++ [
-    pkgs.foot
-    dejavuFonts
-    fontsConf
-    etcPasswd
-    etcGroup
-    etcHostname
-    etcBashrc
-  ];
-
-  # Light-touch resolution utilities (store-mount baking shell + `resolveSpec`).
+  # Light-touch resolution utilities (store-mount baking shell + seal/resolve).
   lib = import ./lib.nix { inherit pkgs pierogi; };
 
-  # root: the sealed rootfs — /bin farm, hand-rolled /etc, baked mountpoints
-  # (incl. the Wayland socket file). No launch-time scaffold.
-  root = pkgs.runCommand "pierogi-foot-root" { } ''
+  # content: the rootfs the author designs — /bin farm, hand-rolled /etc, base
+  # mountpoint dirs (incl. the Wayland socket file). `lib.sealRoot` bakes the
+  # `/nix/store` topology from content's actual references, so there is no dep
+  # list — `fontsConf` pulls `dejavuFonts` into the closure just by being
+  # referenced (its content names the font path), no need to list either.
+  content = pkgs.runCommand "pierogi-foot-content" { } ''
     source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
@@ -115,18 +105,15 @@ let
     # bind target (a socket binds onto a file), so it's `touch`ed, not a dir.
     bake_dirs ${pkgs.lib.escapeShellArgs lib.defaultMountDirs} /home/pierogi /root /run/user/1000
     touch $out/run/user/1000/wayland-0
-
-    # The /nix/store/<hash> mountpoints (kind matches source) + root's own
-    # /nix/store/<self> identity mountpoint. See `bake_store_mounts` in build-lib.sh.
-    bake_store_mounts $(cat ${lib.storePaths deps})
+    # The `/nix/store` mountpoints are NOT baked here — `lib.sealRoot` owns those.
   '';
 
   # The default-closed floor, as spec fields (see nix/profiles.nix).
   profiles = import ./profiles.nix { };
 
   # The sources spec: `profiles.base` merged with this sandbox's fields.
+  # `root.path` + `closure` are injected by `lib.sealAndResolve`.
   unresolvedSpec = pkgs.lib.recursiveUpdate profiles.base {
-    root.path = "${root}";
     process = {
       executable = "foot";
       args = [ ];
@@ -160,15 +147,15 @@ let
     # pump); foot runs the pump-less path (`terminal = false`), so it declares
     # one itself — `lib.mounts.devpts`, after `/dev` (which it mounts onto).
     mounts = lib.defaultMounts ++ [ lib.mounts.devpts ];
-    # `closure.seeds` is injected by `resolveSpec` from its `seeds` arg (below).
+    # `root.path` + `closure` are injected by `lib.sealAndResolve` (below).
   };
 
-  # Build: traverse root's reference graph from the seeds and stamp
-  # `closure.resolved`. See `lib.resolveSpec` / bash-sandbox.nix.
-  resolved = lib.resolveSpec {
+  # Seal `content` into the rootfs and resolve against it — bakes the /nix/store
+  # topology from content's actual references, no dep list. See bash-sandbox.nix.
+  resolved = lib.sealAndResolve {
     name = "pierogi-foot-sandbox";
     spec = unresolvedSpec;
-    seeds = [ root ];
+    content = content;
   };
 
 in

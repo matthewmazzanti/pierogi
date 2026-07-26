@@ -1,10 +1,10 @@
 # M1 nix-mode artifact — a Wayland-routing sandbox (sealed-rootfs edition).
 #
-# Sibling of `bash-sandbox.nix`: same sealed-rootfs pipeline (deps → closureInfo
-# → `root` symlink farm + baked mountpoints → `resolve --graph` stamps
-# `closure.resolved`), so see that file for the full rationale on the two closure
-# mechanisms and the `exportReferencesGraph` traversal. What's different here is
-# the *point*: it tests **routing a host Wayland socket into the container**.
+# Sibling of `bash-sandbox.nix`: same "input derivation" pipeline (explicit
+# `content` build → `lib.sealAndResolve` bakes the /nix/store topology from
+# content's references and stamps `closure.resolved`), so see that file for the
+# full rationale. What's different here is the *point*: it tests **routing a host
+# Wayland socket into the container**.
 #
 # The runnable executable is `wayland-info` (from wayland-utils) — a one-shot,
 # non-graphical client that connects to `$WAYLAND_DISPLAY`, dumps the
@@ -33,17 +33,14 @@ let
     pierogi
   '';
 
-  # The runtime deps — root's references. `root` itself is NOT here (circular;
-  # it doesn't exist yet). wayland-utils supplies /bin/wayland-info and pulls in
-  # libwayland + its closure.
-  deps = [ pkgs.wayland-utils etcHostname ];
-
-  # Light-touch resolution utilities (store-mount baking shell + `resolveSpec`).
+  # Light-touch resolution utilities (store-mount baking shell + seal/resolve).
   lib = import ./lib.nix { inherit pkgs pierogi; };
 
-  # root: the sealed rootfs — a /bin symlink farm, hand-rolled /etc, and every
-  # mountpoint baked in (incl. the Wayland socket file). No launch-time scaffold.
-  root = pkgs.runCommand "pierogi-wayland-root" { } ''
+  # content: the rootfs the author designs — a /bin farm, hand-rolled /etc, base
+  # mountpoint dirs (incl. the Wayland socket file). `lib.sealRoot` bakes the
+  # `/nix/store` topology from content's actual references (wayland-utils + its
+  # closure), so there is no dep list.
+  content = pkgs.runCommand "pierogi-wayland-content" { } ''
     source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
@@ -61,19 +58,15 @@ let
     # dir. The read-only rootfs can't grow these at launch — hence baking them.
     bake_dirs ${pkgs.lib.escapeShellArgs lib.defaultMountDirs} /run/user/1000
     touch $out/run/user/1000/wayland-0
-
-    # The /nix/store/<hash> mountpoints (kind matches source) + root's own
-    # /nix/store/<self> identity mountpoint. See `bake_store_mounts` in build-lib.sh.
-    bake_store_mounts $(cat ${lib.storePaths deps})
+    # The `/nix/store` mountpoints are NOT baked here — `lib.sealRoot` owns those.
   '';
 
   # The default-closed floor, as spec fields (see nix/profiles.nix).
   profiles = import ./profiles.nix { };
 
   # The sources spec: `profiles.base` merged with this sandbox's fields.
-  # `closure.seeds` set; `closure.resolved` stamped by `resolve --graph`.
+  # `root.path` + `closure` are injected by `lib.sealAndResolve`.
   unresolvedSpec = pkgs.lib.recursiveUpdate profiles.base {
-    root.path = "${root}";
     process = {
       executable = "wayland-info";
       args = [ ];
@@ -90,15 +83,15 @@ let
     # Placements — the common base trio (proc/dev/tmp), lifted out of the engine
     # into the producer layer (see nix/lib.nix). Verbatim OCI mounts.
     mounts = lib.defaultMounts;
-    # `closure.seeds` is injected by `resolveSpec` from its `seeds` arg (below).
+    # `root.path` + `closure` are injected by `lib.sealAndResolve` (below).
   };
 
-  # Build: traverse root's reference graph from the seeds and stamp
-  # `closure.resolved`. See `lib.resolveSpec` / bash-sandbox.nix.
-  resolved = lib.resolveSpec {
+  # Seal `content` into the rootfs and resolve against it — bakes the /nix/store
+  # topology from content's actual references, no dep list. See bash-sandbox.nix.
+  resolved = lib.sealAndResolve {
     name = "pierogi-wayland-sandbox";
     spec = unresolvedSpec;
-    seeds = [ root ];
+    content = content;
   };
 
 in
