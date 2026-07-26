@@ -79,49 +79,48 @@ rec {
       closure = (spec.closure or { }) // { seeds = map toString seeds; };
     };
     file = pkgs.writeText "${name}.unresolved.json" (builtins.toJSON spec');
-  in pkgs.runCommand "${name}.json"
-    {
-      __structuredAttrs = true;
-      exportReferencesGraph.closure = seeds;
-    } ''
+  in pkgs.runCommand "${name}.json" {
+    __structuredAttrs = true;
+    exportReferencesGraph.closure = seeds;
+  } ''
     ${pierogi}/bin/pierogi resolve ${file} --graph "$NIX_ATTRS_JSON_FILE" > "''${outputs[out]}"
   '';
 
-  # Seal an explicitly-built `content` derivation into a sealed rootfs: copy its
+  # Seal an explicitly-built `rootTree` derivation into a sealed rootfs: copy its
   # tree, then bake the `/nix/store/<hash>` mountpoints + root's own identity.
   #
-  # This is the "input derivation" model — the closure comes from `content`'s
+  # This is the "input derivation" model — the closure comes from `rootTree`'s
   # *actual references* (`closureInfo`), so there is no hand-maintained dep list
-  # mirroring what the build installs. `content` is pure scaffold: the copied tree
+  # mirroring what the build installs. `rootTree` is pure scaffold: the copied tree
   # holds symlinks pointing at the tools/etc, so the sealed root references *those*
-  # directly, not `content` — which therefore drops out of the closure (we filter
-  # it) and is GC-able after the build. The set we bake — `closure(content)` minus
-  # `content`, plus `<self>` — is exactly `closure(sealed root)`, so every baked
+  # directly, not `rootTree` — which therefore drops out of the closure (we filter
+  # it) and is GC-able after the build. The set we bake — `closure(rootTree)` minus
+  # `rootTree`, plus `<self>` — is exactly `closure(sealed root)`, so every baked
   # mountpoint is a path `resolve` will bind, and vice-versa.
   #
-  # Fails loud if `content` already carries a `/nix` tree: the store topology is
-  # this step's to own, and a content build that baked its own would double up.
-  sealRoot = { name, content }: pkgs.runCommand "${name}-root" { } ''
+  # Fails loud if `rootTree` already carries a `/nix` tree: the store topology is
+  # this step's to own, and a rootTree build that baked its own would double up.
+  sealRoot = { name, rootTree }: pkgs.runCommand "${name}-root" { } ''
     source ${buildLib}
-    if [ -e "${content}/nix" ]; then
-      echo "sealRoot: ${content} already carries /nix — the /nix/store tree is sealRoot's to bake, not the content build's" >&2
+    if [ -e "${rootTree}/nix" ]; then
+      echo "sealRoot: ${rootTree} already carries /nix — the /nix/store tree is sealRoot's to bake, not the rootTree build's" >&2
       exit 1
     fi
-    # Copy content's tree (symlinks + baked dirs), then make it writable so we
-    # can bake into it — nix froze `content` read-only in the store.
-    cp -aT ${content} "$out"
+    # Copy the rootTree (symlinks + baked dirs), then make it writable so we can
+    # bake into it — nix froze `rootTree` read-only in the store.
+    cp -aT ${rootTree} "$out"
     chmod -R u+w "$out"
-    bake_store_mounts $(grep -vxF "${content}" ${storePaths [ content ]})
+    bake_store_mounts $(grep -vxF "${rootTree}" ${storePaths [ rootTree ]})
   '';
 
-  # Seal `content` into a rootfs and resolve `spec` against it — the single entry
+  # Seal `rootTree` into a rootfs and resolve `spec` against it — the single entry
   # point a sandbox uses. Injects `root.path` (the sealed root) and seeds
   # `[ root ] ++ extraSeeds` (extras for overlay lowers), then stamps
-  # `closure.resolved` via `resolveSpec`. The sandbox builds `content` explicitly
+  # `closure.resolved` via `resolveSpec`. The sandbox builds `rootTree` explicitly
   # (bin farm, /etc, base mountpoints) and hands it here; store topology and
   # resolution are this layer's job.
-  sealAndResolve = { name, spec, content, extraSeeds ? [ ] }: let
-    root = sealRoot { inherit name content; };
+  sealAndResolve = { name, spec, rootTree, extraSeeds ? [ ] }: let
+    root = sealRoot { inherit name rootTree; };
   in resolveSpec {
     inherit name;
     spec = pkgs.lib.recursiveUpdate spec { root.path = "${root}"; };

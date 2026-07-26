@@ -12,26 +12,26 @@
 #
 # The pipeline it exercises (the "input derivation" model — see nix/lib.nix):
 #
-#   content = runCommand …           the rootfs the author designs, explicitly:
+#   rootTree = runCommand …           the tree the author designs, explicitly:
 #     │                                a /bin farm, hand-rolled /etc, base
 #     │                                mountpoint dirs. NOT the /nix/store tree.
 #     │
-#     └─ lib.sealAndResolve { spec; content }:
-#          ├─ sealRoot content        cp content's tree, then bake the
+#     └─ lib.sealAndResolve { spec; rootTree }:
+#          ├─ sealRoot rootTree        cp rootTree's tree, then bake the
 #          │    │                       /nix/store/<hash> mountpoints from
-#          │    │                       content's OWN references (closureInfo),
+#          │    │                       rootTree's OWN references (closureInfo),
 #          │    │                       + root's /nix/store/<self>. → sealed root
-#          │    └─ (fails loud if content already carries /nix)
+#          │    └─ (fails loud if rootTree already carries /nix)
 #          └─ resolveSpec { spec + root.path; seeds = [root] }
 #               └─ __structuredAttrs + exportReferencesGraph.closure = [root];
 #                  pierogi resolve --graph → `resolved` (closure stamped in)
 #
 # The point of the split: there is **no hand-maintained dep list**. The closure
-# to bake is derived from what `content` *actually references* (its /bin and /etc
-# symlink targets), so adding an /etc file or a tool is a single edit to `content`
-# — never a parallel `deps` entry. `content` is build scaffold: the sealed root
+# to bake is derived from what `rootTree` *actually references* (its /bin and /etc
+# symlink targets), so adding an /etc file or a tool is a single edit to `rootTree`
+# — never a parallel `deps` entry. `rootTree` is build scaffold: the sealed root
 # copies its symlink tree (pointing at the tools), so it references the tools
-# directly, not `content`, which drops out of the closure.
+# directly, not `rootTree`, which drops out of the closure.
 #
 # No `nix-store` query runs at build: the build sandbox has no daemon. The bake
 # list comes from `closureInfo`; `resolved`'s graph from `exportReferencesGraph`,
@@ -77,13 +77,13 @@ let
   # Light-touch resolution utilities (store-mount baking shell + seal/resolve).
   lib = import ./lib.nix { inherit pkgs pierogi; };
 
-  # content: the rootfs the author designs — a /bin symlink farm, hand-rolled
+  # rootTree: the tree the author designs — a /bin symlink farm, hand-rolled
   # /etc, and the base mountpoint dirs. Deliberately NOT the `/nix/store`
-  # topology: `lib.sealRoot` bakes that from content's *actual references*, so
-  # there is no separate dep list to keep in sync. content is build scaffold —
-  # the sealed root copies its tree and references the tools directly, so content
+  # topology: `lib.sealRoot` bakes that from rootTree's *actual references*, so
+  # there is no separate dep list to keep in sync. rootTree is build scaffold —
+  # the sealed root copies its tree and references the tools directly, so rootTree
   # itself drops out of the closure.
-  content = pkgs.runCommand "pierogi-bash-content" { } ''
+  rootTree = pkgs.runCommand "pierogi-bash-root-tree" { } ''
     source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
@@ -95,7 +95,7 @@ let
     # Hand-rolled /etc — symlinks into the store (each is a closure member, so it
     # resolves inside the sandbox). A symlink, not a copy: a copy would bake
     # opaque bytes with no store ref; the symlink makes /etc/passwd a real store
-    # path that content references and `sealRoot` folds into the closure.
+    # path that rootTree references and `sealRoot` folds into the closure.
     ln -s ${etcPasswd}   $out/etc/passwd
     ln -s ${etcGroup}    $out/etc/group
     ln -s ${etcHostname} $out/etc/hostname
@@ -116,7 +116,7 @@ let
 
   # The sources spec: `profiles.base` (the floor) merged with this sandbox's own
   # fields. `root.path` and `closure` are injected by `lib.sealAndResolve` (it
-  # seals `content`, then stamps them), so they're absent here.
+  # seals `rootTree`, then stamps them), so they're absent here.
   #
   # The process fields track docker-compose, flat: `executable`/`args` (execve),
   # `tty`, `environment`. The rest are faithful OCI pass-throughs (from `base`).
@@ -147,14 +147,14 @@ let
     # `root.path` + `closure` are injected by `lib.sealAndResolve` (below).
   };
 
-  # Seal `content` into the rootfs and resolve against it: `sealAndResolve` bakes
-  # the /nix/store topology from content's actual references, injects `root.path`
+  # Seal `rootTree` into the rootfs and resolve against it: `sealAndResolve` bakes
+  # the /nix/store topology from rootTree's actual references, injects `root.path`
   # + seeds, and stamps `closure.resolved`. No dep list — the closure is whatever
-  # content references. See `lib.sealAndResolve`.
+  # rootTree references. See `lib.sealAndResolve`.
   resolved = lib.sealAndResolve {
     name = "pierogi-bash-sandbox";
     spec = unresolvedSpec;
-    content = content;
+    rootTree = rootTree;
   };
 
 in

@@ -1,8 +1,8 @@
 # M1 nix-mode artifact — a Wayland-routing sandbox (sealed-rootfs edition).
 #
 # Sibling of `bash-sandbox.nix`: same "input derivation" pipeline (explicit
-# `content` build → `lib.sealAndResolve` bakes the /nix/store topology from
-# content's references and stamps `closure.resolved`), so see that file for the
+# `rootTree` build → `lib.sealAndResolve` bakes the /nix/store topology from
+# rootTree's references and stamps `closure.resolved`), so see that file for the
 # full rationale. What's different here is the *point*: it tests **routing a host
 # Wayland socket into the container**.
 #
@@ -36,11 +36,11 @@ let
   # Light-touch resolution utilities (store-mount baking shell + seal/resolve).
   lib = import ./lib.nix { inherit pkgs pierogi; };
 
-  # content: the rootfs the author designs — a /bin farm, hand-rolled /etc, base
+  # rootTree: the tree the author designs — a /bin farm, hand-rolled /etc, base
   # mountpoint dirs (incl. the Wayland socket file). `lib.sealRoot` bakes the
-  # `/nix/store` topology from content's actual references (wayland-utils + its
+  # `/nix/store` topology from rootTree's actual references (wayland-utils + its
   # closure), so there is no dep list.
-  content = pkgs.runCommand "pierogi-wayland-content" { } ''
+  rootTree = pkgs.runCommand "pierogi-wayland-root-tree" { } ''
     source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
@@ -86,12 +86,12 @@ let
     # `root.path` + `closure` are injected by `lib.sealAndResolve` (below).
   };
 
-  # Seal `content` into the rootfs and resolve against it — bakes the /nix/store
-  # topology from content's actual references, no dep list. See bash-sandbox.nix.
+  # Seal `rootTree` into the rootfs and resolve against it — bakes the /nix/store
+  # topology from rootTree's actual references, no dep list. See bash-sandbox.nix.
   resolved = lib.sealAndResolve {
     name = "pierogi-wayland-sandbox";
     spec = unresolvedSpec;
-    content = content;
+    rootTree = rootTree;
   };
 
 in

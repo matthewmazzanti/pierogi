@@ -76,12 +76,12 @@ let
   # Light-touch resolution utilities (store-mount baking shell + seal/resolve).
   lib = import ./lib.nix { inherit pkgs pierogi; };
 
-  # content: the rootfs the author designs — /bin farm, hand-rolled /etc, base
+  # rootTree: the tree the author designs — /bin farm, hand-rolled /etc, base
   # mountpoint dirs (incl. the Wayland socket file). `lib.sealRoot` bakes the
-  # `/nix/store` topology from content's actual references, so there is no dep
+  # `/nix/store` topology from rootTree's actual references, so there is no dep
   # list — `fontsConf` pulls `dejavuFonts` into the closure just by being
-  # referenced (its content names the font path), no need to list either.
-  content = pkgs.runCommand "pierogi-foot-content" { } ''
+  # referenced (its contents name the font path), no need to list either.
+  rootTree = pkgs.runCommand "pierogi-foot-root-tree" { } ''
     source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
@@ -150,12 +150,12 @@ let
     # `root.path` + `closure` are injected by `lib.sealAndResolve` (below).
   };
 
-  # Seal `content` into the rootfs and resolve against it — bakes the /nix/store
-  # topology from content's actual references, no dep list. See bash-sandbox.nix.
+  # Seal `rootTree` into the rootfs and resolve against it — bakes the /nix/store
+  # topology from rootTree's actual references, no dep list. See bash-sandbox.nix.
   resolved = lib.sealAndResolve {
     name = "pierogi-foot-sandbox";
     spec = unresolvedSpec;
-    content = content;
+    rootTree = rootTree;
   };
 
 in
