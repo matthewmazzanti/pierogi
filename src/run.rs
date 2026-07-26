@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use crate::oci::{build_spec, RealizeInputs};
 use crate::overrides::Overrides;
 use crate::resolve::{resolve, resolve_from_graph};
-use crate::spec::Spec;
+use crate::spec::{Spec, StorePath};
 use crate::tty::ConsoleRelay;
 
 /// `pierogi run [overrides] <spec.json>` — load a spec, overlay any CLI
@@ -65,10 +65,11 @@ fn launch(spec: Spec) -> Result<()> {
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
-    // Nothing but the container state dir touches disk. crun takes the spec as
-    // an in-memory JSON string (no config.json), and `root` *is* the rootfs (an
-    // absolute store path mounted at `/`, everything baked in — see
-    // `oci::build_spec`), so there is no bundle to assemble. crun still wants a
+    // `root` *is* the rootfs (an absolute store path mounted at `/` — see
+    // `oci::build_spec`), so there is no bundle to assemble; crun takes the spec
+    // as an in-memory JSON string (no config.json). What does touch disk is a
+    // per-run state dir: crun's own `state/`, and the `/nix/store` mountpoint
+    // stubs the engine binds read-only (`scaffold_store`). crun still wants a
     // bundle *context* path, but with an absolute `root.path` its content is
     // irrelevant — we point it at `work`.
     let id = format!("pierogi-{}", std::process::id());
@@ -76,10 +77,17 @@ fn launch(spec: Spec) -> Result<()> {
     let state = work.join("state");
     std::fs::create_dir_all(&state).with_context(|| format!("mkdir {}", state.display()))?;
 
+    // The `/nix/store` mountpoint tree: one stub per resolved path, bound RO at
+    // `/nix/store` so the store topology is provided here rather than baked into
+    // the sealed root (see `oci::build_spec`).
+    let store = work.join("store");
+    scaffold_store(&store, resolved)?;
+
     let oci = build_spec(&RealizeInputs {
         spec: &spec,
         uid,
         gid,
+        store_root: &store,
     })?;
 
     // A `terminal:true` spec needs a controlling tty: bind a console socket and
@@ -106,6 +114,33 @@ fn launch(spec: Spec) -> Result<()> {
 
     let code = result?;
     eprintln!("pierogi: process exited ({code})");
+    Ok(())
+}
+
+/// Pre-create the `/nix/store` mountpoint tree the engine binds read-only: one
+/// stub per resolved path under `store_root`, shaped to match its source — a
+/// file store path (e.g. a `writeText` `/etc` file) needs a file mountpoint, a
+/// dir needs a dir, because a bind's target kind must match its source. The
+/// closure identity-binds onto these stubs, so `/nix/store` is provided at
+/// runtime yet stays read-only: nothing is created at mount time because the
+/// stubs already exist here. (This is the file-vs-dir logic the pre-sealing
+/// `scaffold_mountpoints` ran, back to the engine but for the store tree only.)
+fn scaffold_store(store_root: &Path, resolved: &[StorePath]) -> Result<()> {
+    std::fs::create_dir_all(store_root)
+        .with_context(|| format!("mkdir {}", store_root.display()))?;
+    for path in resolved {
+        let p = path.to_string();
+        let src = Path::new(&p);
+        let name = src
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("store path {p:?} has no basename"))?;
+        let stub = store_root.join(name);
+        if src.is_dir() {
+            std::fs::create_dir(&stub).with_context(|| format!("mkdir {}", stub.display()))?;
+        } else {
+            std::fs::File::create(&stub).with_context(|| format!("touch {}", stub.display()))?;
+        }
+    }
     Ok(())
 }
 

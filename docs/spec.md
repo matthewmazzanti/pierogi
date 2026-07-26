@@ -135,7 +135,9 @@ lower) needs its closure bound, the producer adds it to `closure.seeds`. See
   user's id, resolved at launch. **The floor these carry comes from a producer**
   (`profiles.base`), never the engine.
 - **`root`** — a single, **required** store path: the **rootfs**. The FHS-root
-  mounted at `/` (read-only), carrying `/etc`, `/bin`, and every baked mountpoint.
+  mounted at `/` (read-only), carrying `/etc`, `/bin`, and the static mountpoint
+  dirs (`/proc`, `/dev`, `/tmp`, an empty `/nix/store`) — the `/nix/store/<hash>`
+  tree is a read-only launch-time bind, not baked in.
   It's a closure seed (declared in `closure.seeds`) and where `PATH` conventionally
   points, and it's in `closure.resolved` too — identity-bound at
   `/nix/store/<self>` so absolute references into it resolve — on top of being the
@@ -245,18 +247,21 @@ the rest of the attrs), builds a `path → references` map, and walks requisites
 from the spec's seeds (`resolve::resolve_from_graph`). No `store-paths` /
 `registration` files, no `nix-store` call, no flat list taken on faith.
 
-> Two gotchas the code encodes: it's the **top-level** `.closure` key that holds
-> the expanded graph — `.exportReferencesGraph.closure` in the same file only
-> echoes the requested roots, so it's no shortcut. And `closureInfo` still appears
-> in the sandbox build, but only as a convenience for the flat mkdir list of
-> mountpoints to *bake* — not as pierogi's input.
+> A gotcha the code encodes: it's the **top-level** `.closure` key that holds the
+> expanded graph — `.exportReferencesGraph.closure` in the same file only echoes
+> the requested roots, so it's no shortcut. (`closureInfo` no longer appears in
+> the sandbox build at all — the store mountpoints it used to feed are now
+> assembled read-only at launch, not baked into `root`.)
 
 ## Realization (what the engine does)
 
-- `closure.resolved` → one ro identity bind per path under `/nix/store`, onto the
-  mountpoint dirs baked into `root`. Includes `root` itself (bound at
-  `/nix/store/<self>`). Per-path binds today; the merged-tree representation is
-  the lever-6 perf question — see [startup-performance.md](startup-performance.md).
+- `closure.resolved` → a **read-only** `/nix/store` bind of a launch-time state
+  dir (one mountpoint stub per path, file- or dir-shaped to match), then one ro
+  identity bind per path onto its stub. Includes `root` itself (bound at
+  `/nix/store/<self>`). The store tree is provided at runtime — not baked into
+  `root` — yet stays read-only (the stubs pre-exist, nothing is created at mount
+  time). Per-path binds today; the merged-tree representation is the lever-6 perf
+  question — see [startup-performance.md](startup-performance.md).
 - `mounts` → appended **verbatim** after the closure binds (so an overlay
   `lowerdir` or relocated source already exists). Binds, tmpfs, overlays, idmapped
   mounts alike — the engine adds nothing; if crun can't realize one (rootless
@@ -272,26 +277,28 @@ from the spec's seeds (`resolve::resolve_from_graph`). No `store-paths` /
 - `environment` → `process.env`, verbatim.
 - `read_only` → `root.readonly` (default `true`; `false` is the recorded OPEN).
 - OCI `root.path` **is `root`** — the sealed rootfs store path, mounted at `/`
-  and remounted read-only. `root` carries the whole skeleton (`/etc`, `/bin`,
-  and the `/proc`, `/dev`, `/tmp`, `/nix/store/<hash>` mountpoint dirs —
-  *including its own* `/nix/store/<self>`), baked at build time, so there is **no
-  empty scaffold to assemble** and no launch-time `mkdir`. `root` is **also** in
-  `closure.resolved`: identity-bound at `/nix/store/<self>` so absolute
-  references into it resolve, on top of being the `/` mount — see the
+  and remounted read-only. `root` carries the skeleton it can bake statically:
+  `/etc`, `/bin`, and the base mountpoint dirs (`/proc`, `/dev`, `/tmp`, and an
+  empty `/nix/store`). It does **not** carry the `/nix/store/<hash>` tree — that
+  topology depends on the closure, so it's assembled at launch (a state dir of
+  stubs, bound read-only at `/nix/store`; see the `closure.resolved` bullet
+  above), which keeps `root`'s own Nix references to just its real content. `root`
+  is **also** in `closure.resolved`: identity-bound at `/nix/store/<self>` so
+  absolute references into it resolve, on top of being the `/` mount — see the
   sealed-rootfs note below.
 
 ### Sealed rootfs (implemented on the `sealed-rootfs` branch)
 
-The rootfs is a single store path with the mount topology **frozen at build
-time**. Consequences that supersede parts of this doc:
+The rootfs is a single store path whose *content* is frozen at build time; its
+`/nix/store` mount tree is assembled read-only at launch. Consequences that
+supersede parts of this doc:
 
 - **`root` is the rootfs *and* a closure bind.** It's mounted at `/` and
   identity-bound at `/nix/store/<self>`, so absolute references into it resolve
-  either way. The circularity of "root's mountpoint tree depends on root's
-  closure" is broken in two places: dep mountpoints are baked from `root`'s
-  *dependencies* (buildable before `root`), and root's *own* `/nix/store/<self>`
-  mountpoint is baked from `$out` — which nix fixes before the builder runs
-  (input-addressed), so root's hash is known during its own build.
+  either way. There is no build-time circularity to break: `root` bakes no
+  `/nix/store/<hash>` mountpoints (that tree is a launch-time bind), so its Nix
+  closure is simply what it references, seeded from `root` itself — no need to
+  seed from its dependencies or fix up a self-mountpoint from `$out`.
 - **No runtime query — pre-bake only.** The live `nix-store --query` path is
   gone entirely (`closure_of` and the `PIEROGI_CLOSURE` stub deleted). A spec's
   `closure` is built at *build time* by traversing a Nix `exportReferencesGraph`
@@ -301,20 +308,23 @@ time**. Consequences that supersede parts of this doc:
   **fails loud**. There is no `Mount::Store` type — a bare store mount was a
   closure seed in disguise (folds are gone), and a relocation is now just a
   `Host` bind whose deps live in `closure`.
-- **No runtime store additions.** A store path added at launch would need a
-  `/nix/store/<hash>` mountpoint the image never baked, so `--mount store:` is
-  gone and a different closure means a different image. `--mount host:` /
-  `tmpfs:` still work, but only onto dests the image already baked.
+- **No runtime store additions.** A store path added at launch would change the
+  closure, which is frozen at build time (its resolved set drives the launch-time
+  store binds, and overrides never re-resolve), so `--mount store:` is gone and a
+  different closure means a different image. `--mount host:` / `tmpfs:` still
+  work, but only onto dests the image already baked.
 - **A built `closure` is authoritative.** `resolve()` only asserts
   `closure.resolved` is there — no query, no seed-drift check. With no runtime
   path that can change a sealed spec's seeds, comparing them every launch would
   only catch a hand-edit-without-re-resolve, so it's dropped. `closure.seeds`
   stays as the build-time input `resolved` was traversed from — also a
   fingerprint to parity-check against a fresh build out-of-band.
-- **File-vs-dir mountpoints move to build time.** A file store path (e.g. a
-  `writeText` `/etc` file) needs a file mountpoint, a dir needs a dir — the root
-  derivation stats each closure member and bakes the matching kind (what
-  `scaffold_mountpoints` used to do at launch).
+- **File-vs-dir mountpoints are made at launch.** A file store path (e.g. a
+  `writeText` `/etc` file) needs a file mountpoint, a dir needs a dir — the
+  engine stats each resolved path and creates the matching stub kind in the state
+  dir it binds read-only at `/nix/store` (`run::scaffold_store`). This covers the
+  store tree only; the *static* mountpoints (`/proc`, `/dev`, `/tmp`, and base
+  dirs like `/home`) are still baked into `root` at build time.
 
 ## JSON serialization
 
@@ -458,12 +468,14 @@ runnable form.
   different `/etc`. Reconcile with the identity sub-schema pinned in
   [architecture.md](architecture.md#spec--rootfs-build-time-vs-runtime).
 - **DECIDED (sealed-rootfs branch) — `root` is the rootfs.** The FHS-root bound at
-  `/`: it carries `/etc`, `/bin`, and every mountpoint (including its own
-  `/nix/store/<self>`), baked at build time. It's also in `closure.resolved` —
-  identity-bound at `/nix/store/<self>` so absolute references into it resolve —
-  on top of being the `/` mount. This resolves the old "root-as-mount" question:
-  `root` is now *structurally special* (the `/` mount), not just another store
-  bind. See [Realization](#realization-what-the-engine-does).
+  `/`: it carries `/etc`, `/bin`, and the static mountpoint dirs (`/proc`, `/dev`,
+  `/tmp`, an empty `/nix/store`), baked at build time. The `/nix/store/<hash>`
+  tree is not baked in — it's a read-only launch-time bind (a state dir of stubs).
+  `root` is also in `closure.resolved` — identity-bound at `/nix/store/<self>` so
+  absolute references into it resolve — on top of being the `/` mount. This
+  resolves the old "root-as-mount" question: `root` is now *structurally special*
+  (the `/` mount), not just another store bind. See
+  [Realization](#realization-what-the-engine-does).
 - **TODO — the rest of the runtime surface.** `hostname`, `tty`, `working_dir`,
   and `read_only` are now folded into the flat schema (compose-flavoured); still
   outstanding: namespaces, uid/gid maps (`user`), dbus/seccomp rules — present in

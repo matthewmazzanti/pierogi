@@ -15,9 +15,9 @@ the config→spec resolution pipeline, and the `closure:` fast-path.
    pierogi bakes at runtime, in a          Nix derivation pre-built:
    scratch dir OUTSIDE the store:           • one self-contained resolved spec
     • a sealed rootfs — /etc, /bin,         • root IS the rootfs: /etc, /bin &
-      mountpoints — over the target's         every mountpoint baked & frozen
-      closure                                 at build time; closure.resolved
-    • the matching spec                       names every store path absolutely
+      mountpoints — over the target's         base mountpoints baked at build;
+      closure                                 the /nix/store tree binds RO at
+    • the matching spec                       launch; closure.resolved absolute
             │                                       │
             └──────────────┬────────────────────────┘
                     ▼   (a sealed rootfs + its resolved spec, however baked)
@@ -53,8 +53,9 @@ only in *when* the spec is produced:
   resolved spec (a JSON file). Its `closure.resolved` name every store path
   absolutely, so the file is self-contained — Nix pins the whole closure as the
   artifact's references automatically (it scans the output for `/nix/store/…`
-  strings), and `/etc`, `/bin`, and every mountpoint are baked into `root` at
-  build time. The mount topology is frozen; the Engine just reads and runs.
+  strings), and `/etc`, `/bin`, and the base mountpoint dirs are baked into `root`
+  at build time. The `/nix/store` tree is a read-only launch-time bind; the Engine
+  assembles it and runs.
 
 Same engine, same security-critical core; only the provenance of its inputs
 changes. The exact serialized **spec format** is still open in detail (see
@@ -148,9 +149,10 @@ runtime owns the intermediate/init process where the per-thread syscalls happen.
 The Engine drives the runtime from a **spec** (runtime concerns) plus the
 **filesystem** it describes. These are two *roles*, not two *files*: `root` **is**
 the rootfs — a `/nix/store` path mounted at `/` (read-only) that bakes `/etc`,
-`/bin`, and every mountpoint at build time — and the rest of the filesystem is the
-spec's closure, carried **inside** the spec as `closure.resolved` (per-path
-identity binds under `/nix/store`). The mount topology is frozen at build; there
+`/bin`, and the base mountpoint dirs at build time — and the rest of the
+filesystem is the spec's closure, carried **inside** the spec as `closure.resolved`
+(per-path identity binds under a read-only `/nix/store` assembled at launch). The
+static topology is frozen at build, the store tree bound read-only at launch; there
 is no separate rootfs input to thread through. So "spec & rootfs" below names the
 boundary, not a two-entry on-disk layout.
 
@@ -163,8 +165,8 @@ filesystem — the store paths are named, not shipped as an image manifest):
 - exec args / cwd / env
 - identity for synthetic `/etc` (hostname, user)
 - `root` — the rootfs store path, mounted at `/` read-only
-- `closure.resolved` — the closure as absolute store paths, each bound onto a
-  build-time-baked `/nix/store/<hash>` mountpoint (`root` itself is included,
+- `closure.resolved` — the closure as absolute store paths, each bound read-only
+  onto a launch-time `/nix/store/<hash>` stub (`root` itself is included,
   identity-bound at `/nix/store/<self>` as well as being the `/` mount)
 
 **Provenance:**
@@ -174,9 +176,10 @@ filesystem — the store paths are named, not shipped as an image manifest):
 - **Nix mode** consumes a store path built ahead of time that *is* the resolved
   spec — a single JSON file, e.g. `/nix/store/…-sandbox.json`. The file is
   self-contained: `closure.resolved` name every store path absolutely, `root`
-  bakes `/etc`, `/bin`, and every mountpoint (topology frozen at build, no
-  runtime assembly), and Nix pins the whole closure as the artifact's runtime
-  references automatically by scanning the output for `/nix/store/…` strings. The
+  bakes `/etc`, `/bin`, and the base mountpoint dirs (the `/nix/store` tree is a
+  read-only launch-time bind), and Nix pins the whole closure as the artifact's
+  runtime references automatically by scanning the output for `/nix/store/…`
+  strings. The
   Engine reads the file, and because it is already resolved (`closure:` present)
   it runs the sealed fast-path — this is exactly `run <spec.json>`, no separate
   code path.

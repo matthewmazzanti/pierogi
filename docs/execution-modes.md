@@ -200,8 +200,8 @@ so absolute references into it resolve) and as the OCI `root.path` mounted at
 against `resolved`, and the two are stamped together at build, never re-derived.
 
 **Representation is swappable.** The engine realizes `resolved` as **per-path
-binds** — one read-only identity bind per store path, onto mountpoint dirs baked
-into `root` (`src/oci.rs`). A `rootfs -> <merged tree>` symlink is an alternative
+binds** — one read-only identity bind per store path, onto a read-only
+`/nix/store` bind of a launch-time stub tree (`src/oci.rs`, `src/run.rs`). A `rootfs -> <merged tree>` symlink is an alternative
 serialization of the same "resolution done statically" idea; the choice is the
 mount-count lever (see startup-performance.md, lever 6) and lives entirely behind
 the spec's rootfs-representation seam. **Per-path binds for now** — so the

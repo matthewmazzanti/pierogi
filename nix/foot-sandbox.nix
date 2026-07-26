@@ -73,15 +73,15 @@ let
   # is needed.
   terminalTools = import ./terminal-tools.nix { inherit pkgs; };
 
-  # Light-touch resolution utilities (store-mount baking shell + seal/resolve).
+  # Light-touch resolution utilities (build shell + resolveSpec).
   lib = import ./lib.nix { inherit pkgs pierogi; };
 
-  # rootTree: the tree the author designs — /bin farm, hand-rolled /etc, base
-  # mountpoint dirs (incl. the Wayland socket file). `lib.sealRoot` bakes the
-  # `/nix/store` topology from rootTree's actual references, so there is no dep
-  # list — `fontsConf` pulls `dejavuFonts` into the closure just by being
-  # referenced (its contents name the font path), no need to list either.
-  rootTree = pkgs.runCommand "pierogi-foot-root-tree" { } ''
+  # root: the tree the author designs — /bin farm, hand-rolled /etc, base
+  # mountpoint dirs (incl. an empty /nix/store and the Wayland socket file). It IS
+  # the `/` mount; `lib.resolveSpec` derives the closure from its actual
+  # references, so there is no dep list — `fontsConf` pulls `dejavuFonts` into the
+  # closure just by being referenced (its contents name the font path).
+  root = pkgs.runCommand "pierogi-foot-root" { } ''
     source ${lib.buildLib}
     mkdir -p $out/bin $out/etc
 
@@ -99,13 +99,13 @@ let
     ln -s ${fontsConf}   $out/etc/fonts.conf
     ln -s ${pkgs.ncurses}/share/terminfo $out/etc/terminfo
 
-    # Baked mountpoints — the base trio's dirs (proc/dev/tmp; `/tmp` also
-    # fontconfig's cachedir) + this sandbox's own (/home/pierogi, /root, and the
-    # `/run/user/1000` Wayland socket dir). The `wayland-0` **file** is the socket
-    # bind target (a socket binds onto a file), so it's `touch`ed, not a dir.
+    # Baked mountpoints — the base dirs (proc/dev/tmp + /nix/store, the engine's
+    # store-bind mountpoint; `/tmp` also fontconfig's cachedir) + this sandbox's
+    # own (/home/pierogi, /root, and the `/run/user/1000` Wayland socket dir). The
+    # `wayland-0` **file** is the socket bind target (a socket binds onto a file),
+    # so it's `touch`ed, not a dir.
     bake_dirs ${pkgs.lib.escapeShellArgs lib.defaultMountDirs} /home/pierogi /root /run/user/1000
     touch $out/run/user/1000/wayland-0
-    # The `/nix/store` mountpoints are NOT baked here — `lib.sealRoot` owns those.
   '';
 
   # The default-closed floor, as spec fields (see nix/profiles.nix).
@@ -147,15 +147,16 @@ let
     # pump); foot runs the pump-less path (`terminal = false`), so it declares
     # one itself — `lib.mounts.devpts`, after `/dev` (which it mounts onto).
     mounts = lib.defaultMounts ++ [ lib.mounts.devpts ];
-    # `root.path` + `closure` are injected by `lib.sealAndResolve` (below).
+    # `root.path` + `closure` are injected by `lib.resolveSpec` (below).
   };
 
-  # Seal `rootTree` into the rootfs and resolve against it — bakes the /nix/store
-  # topology from rootTree's actual references, no dep list. See bash-sandbox.nix.
-  resolved = lib.sealAndResolve {
+  # Resolve against `root` — `resolveSpec` injects `root.path` + seeds and stamps
+  # `closure.resolved` from what `root` references, no dep list. The store
+  # topology is a runtime RO bind, not baked. See bash-sandbox.nix.
+  resolved = lib.resolveSpec {
     name = "pierogi-foot-sandbox";
     spec = unresolvedSpec;
-    rootTree = rootTree;
+    root = root;
   };
 
 in

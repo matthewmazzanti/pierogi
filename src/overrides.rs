@@ -13,11 +13,11 @@
 //!   runtime mount can bind onto a baked mountpoint but cannot create one under
 //!   the read-only rootfs.
 //!
-//! **No `--mount store:`.** Adding a store path at runtime would need a fresh
-//! `/nix/store/<hash>` mountpoint the sealed `root` never baked, so the closure
-//! is frozen at build time: a different closure means a different image. See
-//! `docs/execution-modes.md`. `--mount overlay:…` is likewise rejected (its
-//! realization is deferred within M1).
+//! **No `--mount store:`.** Adding a store path at runtime would change the
+//! closure, which is frozen at build time — its resolved set drives the runtime
+//! `/nix/store` binds, and overrides never re-resolve. A different closure means
+//! a different image. See `docs/execution-modes.md`. `--mount overlay:…` is
+//! likewise rejected (its realization is deferred within M1).
 
 use std::path::PathBuf;
 
@@ -108,9 +108,9 @@ fn parse_env(s: &str) -> Result<(String, String)> {
 /// * `tmpfs:DEST` — writable scratch.
 ///
 /// Both bind onto a mountpoint the sealed `root` must already carry. `store:…`
-/// and `overlay:…` are rejected: a store path added at runtime would need a
-/// `/nix/store/<hash>` mountpoint the image never baked (the closure is frozen
-/// at build time), and overlay realization is deferred within M1.
+/// and `overlay:…` are rejected: a store path added at runtime would change the
+/// closure, which is frozen at build time (its resolved set drives the runtime
+/// `/nix/store` binds), and overlay realization is deferred within M1.
 fn parse_mount(s: &str) -> Result<OciMount> {
     let (kind, rest) = s
         .split_once(':')

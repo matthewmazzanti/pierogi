@@ -13,9 +13,12 @@
 //! the setters, neutralizing those vendor defaults.
 //!
 //! Field by field:
-//! * `closure.resolved` → one `ro,nosuid,nodev` identity bind per path under
-//!   `/nix/store` (bind options are a mechanism constant — the store is immutable
-//!   — not a producer knob).
+//! * `closure.resolved` → a **read-only** `/nix/store` bind of a runtime state
+//!   dir holding one pre-created mountpoint stub per path (file- or dir-shaped
+//!   to match its source), then one `ro,nosuid,nodev` identity bind per path
+//!   onto its stub. The store tree is provided at runtime (not baked into the
+//!   sealed root) yet stays read-only — the stubs pre-exist, so nothing is
+//!   created at mount time. All mechanism constants (the store is immutable).
 //! * `mounts` → **verbatim OCI mounts**, straight through (binds, tmpfs,
 //!   overlays, idmapped mounts — no special mount kind).
 //! * `process.executable`+`args` → `process.args`; `process.terminal` (+ devpts);
@@ -28,7 +31,7 @@
 //! * OCI `root.path` is `spec.root.path` — the sealed rootfs mounted at `/`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
@@ -48,6 +51,10 @@ pub struct RealizeInputs<'a> {
     /// in the id mappings, the one host value only known at launch.
     pub uid: u32,
     pub gid: u32,
+    /// The runtime state dir holding the `/nix/store` mountpoint stubs (one per
+    /// resolved path, file- or dir-shaped). Bound read-only at `/nix/store`;
+    /// assembled by `run::scaffold_store`.
+    pub store_root: &'a Path,
 }
 
 pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
@@ -79,18 +86,33 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
     linux.set_net_devices(non_empty_map(lin.net_devices.clone()));
     linux.set_personality(lin.personality.clone());
 
-    // ── mounts: closure binds, then placements, then the terminal devpts ──
-    // The engine injects no base mounts of its own now — `/proc`, `/dev`, and its
-    // `/dev/pts` are all producer placements (spec.mounts), composed from the Nix
-    // profile layer. The only engine-added mounts are the closure identity binds
-    // (a nix mechanism, below) and, for a `terminal`, the console's devpts.
+    // ── mounts: the store tree, then closure binds, then placements, then the
+    //    terminal devpts ──
+    // The engine injects no *base* mounts (`/proc`, `/dev`, `/dev/pts` are all
+    // producer placements from the Nix profile layer). Its only mounts are the
+    // store-topology mechanism (below) and, for a `terminal`, the console devpts.
     let mut mounts: Vec<OciMount> = Vec::new();
-    // Closure identity binds: ro,nosuid,nodev — a mechanism constant (the store is
-    // immutable and holds no device nodes), never a producer knob.
+    // ro,nosuid,nodev — a mechanism constant (the store is immutable and holds no
+    // device nodes), never a producer knob. Shared by the `/nix/store` parent
+    // bind and every identity bind.
     let closure_opts: Vec<String> = ["bind", "ro", "nosuid", "nodev"]
         .iter()
         .map(|s| s.to_string())
         .collect();
+    // The `/nix/store` mountpoint tree: a read-only bind of the runtime state dir
+    // (`store_root`), which holds one pre-created stub per resolved path. The
+    // sealed root bakes only an empty `/nix/store` dir; the stubs live in the
+    // state dir, so `/nix/store` is provided at runtime yet stays RO — the closure
+    // binds land on stubs that already exist (nothing created at mount time). This
+    // keeps the store topology OUT of the sealed root, so root's Nix closure is
+    // exactly what it references — no baked `/nix/store/<hash>` mountpoints.
+    // Mounted first, so the identity binds find their stubs in place.
+    mounts.push(bind_mount(
+        "/nix/store",
+        &input.store_root.to_string_lossy(),
+        &closure_opts,
+    )?);
+    // Closure identity binds: each resolved path onto its stub.
     for path in resolved {
         let p = path.to_string();
         mounts.push(bind_mount(&p, &p, &closure_opts)?);
@@ -300,6 +322,7 @@ mod tests {
             spec: &spec,
             uid: 1000,
             gid: 1000,
+            store_root: Path::new("/run/pierogi-test/store"),
         })
         .unwrap();
         let process = oci.process().as_ref().unwrap();
@@ -335,6 +358,7 @@ mod tests {
             spec: &spec,
             uid: 4242,
             gid: 99,
+            store_root: Path::new("/run/pierogi-test/store"),
         })
         .unwrap();
         let process = oci.process().as_ref().unwrap();
@@ -364,6 +388,7 @@ mod tests {
             spec: &spec,
             uid: 7,
             gid: 7,
+            store_root: Path::new("/run/pierogi-test/store"),
         })
         .unwrap();
         let process = oci.process().as_ref().unwrap();
@@ -384,6 +409,7 @@ mod tests {
             spec: &spec,
             uid: 1,
             gid: 1,
+            store_root: Path::new("/run/pierogi-test/store"),
         })
         .unwrap();
         let caps = oci
@@ -403,7 +429,8 @@ mod tests {
         assert!(build_spec(&RealizeInputs {
             spec: &spec,
             uid: 1,
-            gid: 1
+            gid: 1,
+            store_root: Path::new("/run/pierogi-test/store"),
         })
         .is_err());
     }
@@ -427,6 +454,7 @@ mod tests {
             spec: &spec,
             uid: 1,
             gid: 1,
+            store_root: Path::new("/run/pierogi-test/store"),
         })
         .unwrap();
         let m = oci
@@ -445,13 +473,15 @@ mod tests {
     #[test]
     fn engine_injects_no_base_mounts() {
         // /proc and /dev are both producer placements now. A bare spec (no
-        // placements, no terminal) yields only the closure identity binds — the
-        // engine mounts nothing of its own.
+        // placements, no terminal) yields only the store-topology mounts (the
+        // /nix/store tmpfs + the closure identity binds) — the engine mounts no
+        // base of its own.
         let spec = bare_resolved_spec();
         let oci = build_spec(&RealizeInputs {
             spec: &spec,
             uid: 1,
             gid: 1,
+            store_root: Path::new("/run/pierogi-test/store"),
         })
         .unwrap();
         let mounts = oci.mounts().as_ref().unwrap();
@@ -459,8 +489,42 @@ mod tests {
             mounts
                 .iter()
                 .all(|m| m.destination().starts_with("/nix/store")),
-            "only closure binds; the engine adds no /proc or /dev"
+            "only the /nix/store bind + closure binds; the engine adds no /proc or /dev"
         );
+    }
+
+    #[test]
+    fn store_bind_precedes_closure_binds() {
+        // /nix/store is a read-only bind of the runtime state dir (the mountpoint
+        // stubs), mounted first — the closure identity binds land on those stubs,
+        // so the parent bind must come before any bind whose dest is under it.
+        let spec = bare_resolved_spec(); // one resolved path: /nix/store/aaaa-root
+        let oci = build_spec(&RealizeInputs {
+            spec: &spec,
+            uid: 1,
+            gid: 1,
+            store_root: Path::new("/run/pierogi-test/store"),
+        })
+        .unwrap();
+        let mounts = oci.mounts().as_ref().unwrap();
+        // First mount is the read-only /nix/store bind of the state dir.
+        assert_eq!(mounts[0].destination(), &PathBuf::from("/nix/store"));
+        assert_eq!(mounts[0].typ().as_deref(), Some("bind"));
+        assert_eq!(
+            mounts[0].source().as_deref(),
+            Some(Path::new("/run/pierogi-test/store"))
+        );
+        assert!(mounts[0]
+            .options()
+            .as_ref()
+            .unwrap()
+            .contains(&"ro".to_string()));
+        // The identity bind for the resolved path follows it (lands on a stub).
+        let bind_i = mounts
+            .iter()
+            .position(|m| m.destination() == &PathBuf::from("/nix/store/aaaa-root"))
+            .expect("the resolved path is identity-bound");
+        assert!(bind_i > 0, "the closure bind must follow the /nix/store bind");
     }
 
     #[test]
@@ -481,6 +545,7 @@ mod tests {
             spec: &spec,
             uid: 1,
             gid: 1,
+            store_root: Path::new("/run/pierogi-test/store"),
         })
         .unwrap();
         let mounts = oci.mounts().as_ref().unwrap();
