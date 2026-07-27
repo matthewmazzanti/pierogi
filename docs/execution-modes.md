@@ -19,8 +19,8 @@ spec.
 INPUT              BRIDGE (front-end)         RESOLVE (build time)      SPEC          ENGINE
 ─────              ──────────────────         ────────────────────     ────          ──────
 bare argv    ─┐                            traverse the reference
-config file  ─┼─►  normalize → Config  ──► graph from the seeds  ──► build_spec ──► crun (libcrun)
-store path   ─┘    (+ strict defaults,     → stamp closure           (spec.rs)      load_from_memory
+config file  ─┼─►  normalize → Config  ──► graph from the seeds  ──► build_spec ──► crun binary
+store path   ─┘    (+ strict defaults,     → stamp closure           (spec.rs)      config.json → run
                     identity, scan scope)   (src/resolve.rs)
                     the "just works" layer  pre-baked, never at launch  mode-agnostic tail
 ```
@@ -39,8 +39,8 @@ store path   ─┘    (+ strict defaults,     → stamp closure           (spec
   Either way, a spec that reaches the engine without a built `closure` is a hard
   error (fail loud), never a launch-time resolve *by `run`*.
 - **Spec / Engine:** `build_spec()` builds the in-memory OCI spec (`src/spec.rs`)
-  and **crun** drives it — libcrun via the FFI shim, loading the spec from an
-  in-memory JSON string (`libcrun_container_load_from_memory`, no `config.json`),
+  and **crun** drives it — the OCI spec is serialized to a `config.json` in the
+  per-run bundle dir and the `crun` binary is exec'd against it (`crun run`),
   `src/runtime/{mod,crun}.rs`. crun only — no runtime abstraction. Identical for
   all modes.
 

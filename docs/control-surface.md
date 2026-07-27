@@ -246,7 +246,7 @@ artifact, which breaks the auditability invariant.
 | OCI feature | Why refused |
 |---|---|
 | `hooks` (all phases) | Arbitrary host-side code triggered by the config; the archetypal ambient escape hatch |
-| `hooks.d`-style injection | Bypassed structurally — pierogi drives libcrun directly, no libpod layer scans hook dirs (see [architecture.md](architecture.md)) |
+| `hooks.d`-style injection | Bypassed structurally — pierogi drives crun directly (no libpod/podman layer), so nothing scans hook dirs (see [architecture.md](architecture.md)) |
 | a *non-desugaring* omnibus | A `--privileged` that flips confinement at the runtime layer without writing its expansion into the spec. (A **desugaring** one is fine — see DESUGARED) |
 
 ## Out of scope (decline, with reason)

@@ -29,22 +29,24 @@ spec schema.
 ## M0 — Skeleton & shell-run spike  ⭐ de-risk first  ✅
 
 Prove the single biggest unknown **before** building anything else: that we can
-embed an OCI runtime in-process and actually namespace + `exec` a real shell.
-Deliberately crude — no synth, no strict defaults, no nice spec — just a shell in
-a namespace, driven from Rust.
+drive an OCI runtime and actually namespace + `exec` a real shell. Deliberately
+crude — no synth, no strict defaults, no nice spec — just a shell in a namespace,
+driven from Rust.
 
-**Forces:** the in-process runtime embedding, the backend trait, the
-spec → OCI-spec translation in its thinnest form, project plumbing.
+**Forces:** driving the runtime, the backend trait, the spec → OCI-spec
+translation in its thinnest form, project plumbing.
 
 - [x] Cargo workspace: `pierogi-engine` (lib), `pierogi-cli` (bin). (Add
       `pierogi-synth` in M4.)
 - [x] Minimal in-memory spec struct — only the fields the spike needs.
 - [x] Backend trait + a thin spec → in-memory `oci-spec` translation.
-- [x] **Drive `crun` in-process** (via the `libcrun` FFI shim, rootless) to
+- [x] **Drive the `crun` binary** (as a subprocess, rootless) to
       `create → start → wait → teardown` a `bash` in user + mount + pid
       namespaces, over a minimal store-closure rootfs. *(Started on `youki`
       `libcontainer`, but switched to `crun`: youki couldn't RO-remount a
-      `/nix/store` rootfs.)*
+      `/nix/store` rootfs. An interim design linked `libcrun` in-process via an
+      FFI shim, later dropped for the plain binary — the in-process path saved
+      only ~a few milliseconds, within noise; see startup-performance.md.)*
 - [x] Answer the embedding questions: backend choice, process-model cost, pid-1
       behavior. First cold-start number recorded (see startup-performance.md).
 - [x] Nix flake builds the binary; CI: build/test/clippy/rustfmt.
@@ -344,8 +346,8 @@ path M1 runs, and the emitted spec matches the hand-written equivalent.
 M0 → nix-mode → D-Bus → GPU/Wayland → hardening → browser → Steam → config layer
 is **interest-and-uncertainty-driven**, a deliberate departure from harden-first:
 
-- **The spike (M0) still leads** — in-process runtime embedding was the biggest
-  unknown; everything else builds on it. That much is unchanged.
+- **The spike (M0) still leads** — driving an OCI runtime to namespace + `exec`
+  was the biggest unknown; everything else builds on it. That much is unchanged.
 - **Nix-mode (M1) comes next** because the spec → supplied-closure → engine loop
   is the design's core bet, and proving it end-to-end (schema,
   `exportReferencesGraph` traversal, self-contained resolved-spec artifact)

@@ -13,10 +13,10 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   `/nix/store` rootfs (bare `MS_REMOUNT|MS_RDONLY` vs the store's locked
   `nosuid`/`nodev`); crun re-supplies the flags. Removed `youki.rs`, the `Backend`
   enum + `--runtime` flag, the `crun` feature gate (crun always compiled), and the
-  `libcontainer`/`tracing-subscriber`/`libseccomp` deps. The spec now reaches crun
-  purely as an in-memory JSON string — no `config.json`, and the on-disk *bundle*
-  is gone too (crun's bundle context points at the work dir; only its state dir
-  touches disk). `nix build .#pierogi` + `.#bash-sandbox` verified.
+  `libcontainer`/`tracing-subscriber`/`libseccomp` deps. The spec is built in
+  memory, then serialized to a `config.json` in the per-run bundle dir for the
+  `crun` binary (crun reads its config off disk; only that config and crun's
+  state dir touch disk). `nix build .#pierogi` + `.#bash-sandbox` verified.
 - [ ] **README + `docs/*.md` still describe youki as *the* runtime.** README's
   "M0 spike" front-matter ("embed the youki `libcontainer` runtime", "drives youki
   in-process", the youki-specific findings) and mentions in `docs/architecture.md`
@@ -119,9 +119,10 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   master — likely irreducible, `nix` hands back a `RawFd`); the
   `TIOCGWINSZ`/`TIOCSWINSZ` ioctls (libc holdout — `nix` has no wrapper, could
   use its `ioctl!` macros); `sigaction` install/uninstall; the eventfd counter
-  bump in the handler (async-signal-safe, must stay raw). The FFI in
-  `csrc/shim.c` / `runtime/crun.rs` is inherently unsafe (crun). Goal: shrink the
-  count where it's a real reduction, not just relocation.
+  bump in the handler (async-signal-safe, must stay raw). The old crun FFI shim
+  (`csrc/shim.c`) was the largest unsafe surface; it's gone now that crun is
+  driven as a subprocess (`runtime/crun.rs` shells out — no C boundary). Goal:
+  shrink the remaining count where it's a real reduction, not just relocation.
 
 - [ ] **Find a better pattern for `retry()`.** The manual EINTR-retry loop wraps
   the blocking syscalls. Note: with `SA_RESTART` on SIGWINCH and SIGCHLD blocked

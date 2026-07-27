@@ -15,9 +15,9 @@ the sandbox needs — and the store paths it depends on are bind-mounted in unde
 are baked at **build time** by a Nix expression, so a launch is just namespaces
 + binds + `exec`, no Nix query (see [startup performance](docs/startup-performance.md)).
 
-The runtime is **crun** (libcrun via the FFI shim in `csrc/shim.c`), driven
-in-process. The OCI spec is handed to it as an in-memory JSON string — no
-`config.json`, no on-disk bundle.
+The runtime is the **`crun` binary**, driven as a subprocess. The OCI spec is
+built in memory, serialized to a `config.json` in a per-run bundle dir, and
+`crun run` is exec'd against it — no FFI, no C shim, no libcrun linking.
 
 ## Build & run
 
@@ -60,9 +60,10 @@ closure under `/nix/store` and a writable tmpfs `/tmp`, `/dev`, and `/proc`.
 
 ### Findings still worth knowing
 
-- **In-memory spec.** `libcrun_container_load_from_memory` takes the spec as a
-  JSON string, so nothing touches disk but crun's own state dir. (youki, the
-  original second backend, was dropped — it couldn't RO-remount a `/nix/store`
+- **In-memory spec, serialized per run.** The OCI spec is built in memory, then
+  written to a `config.json` in the per-run bundle dir for the crun binary — the
+  only things that touch disk are that config and crun's own state dir. (youki,
+  the original second backend, was dropped — it couldn't RO-remount a `/nix/store`
   rootfs; crun re-supplies the kernel-locked mount flags and handles it.)
 - **devices.** Don't bind device nodes via `mounts[]` (EINVAL). Mount a `/dev`
   tmpfs and let crun populate its default device nodes.
@@ -73,10 +74,8 @@ closure under `/nix/store` and a writable tmpfs `/tmp`, `/dev`, and `/proc`.
 
 ```
 src/            # the pierogi crate: resolve, spec, oci translation, run, tty relay
-src/runtime/    # crun backend (libcrun via the FFI shim)
-csrc/shim.c     # Rust <-> libcrun bridge
-build.rs        # compiles + links the shim
+src/runtime/    # crun backend (execs the crun binary as a subprocess)
 nix/            # bash-sandbox.nix — the sealed-rootfs build pipeline
-flake.nix .envrc# dev shell: rust toolchain + the harvested libcrun dev tree
+flake.nix .envrc# dev shell: rust toolchain (crun binary pinned via CRUN_BIN)
 docs/           # vision / architecture / execution-modes / spec / control-surface / roadmap
 ```

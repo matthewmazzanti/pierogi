@@ -26,12 +26,11 @@ the config→spec resolution pipeline, and the `closure:` fast-path.
   │  obtain spec (generate │ read) → translate to OCI runtime│
   │  spec in memory → spawn proxies → drive crun ────────────┼──┐
   └─────────────────────────────────────────────────────────┘  │
-                    supervises  │                       in-process via FFI
+                    supervises  │                     exec crun subprocess
                       ┌─────────▼─────────┐                     │
-                      │  Proxy layer      │    csrc/shim.c → libcrun:
-                      │  dbus filter, etc │    load_from_memory(JSON) →
-                      └───────────────────┘    unshare/pivot_root/cgroup/
-                                               seccomp/exec
+                      │  Proxy layer      │    write config.json → crun run:
+                      │  dbus filter, etc │    unshare/pivot_root/cgroup/
+                      └───────────────────┘    seccomp/exec
 ```
 
 **Key invariant:** the Engine drives the runtime from a **spec**, regardless of
@@ -71,14 +70,16 @@ security-critical, and the *least* differentiated code we could write — so
 we delegate it to an existing runtime rather than own it. **Hand-rolling it is a
 live option, currently rejected on that cost basis, not refused on principle** —
 it comes back on the table the moment it can meet the security bar. The runtime
-is fixed to **crun** (libcrun), driven **in-process via an FFI shim**
-(`csrc/shim.c`). youki was evaluated and dropped: its `libcontainer` could not
-read-only-remount a `/nix/store` rootfs, whereas crun re-supplies the
-kernel-locked mount flags. Pierogi builds crun's config **in memory**, serializes
-it to a JSON **string**, and hands it to `libcrun_container_load_from_memory` — no
-OCI bundle / `config.json` on disk, no runtime-CLI subprocess, because the
-exec-a-CLI path costs the startup we're trying to save. Pierogi's value-add is
-everything *around* the mechanics: the strict-by-default front-ends, synthetic
+is fixed to **crun**, driven as a **subprocess**. youki was evaluated and dropped:
+its `libcontainer` could not read-only-remount a `/nix/store` rootfs, whereas crun
+re-supplies the kernel-locked mount flags. Pierogi builds crun's config **in
+memory**, serializes it to a `config.json` in the per-run bundle dir, and execs
+`crun run` against it. (An earlier design linked `libcrun` in-process via an FFI
+shim to keep the spec in memory and skip a subprocess; a head-to-head benchmark
+showed that bought only ~a few milliseconds — within the noise of the namespace/
+mount setup that dominates startup — so the shim was dropped for the plain
+binary. See [startup-performance.md](startup-performance.md).) Pierogi's value-add
+is everything *around* the mechanics: the strict-by-default front-ends, synthetic
 system state, the proxy layers, and the Nix integration.
 
 **Third principle: the engine holds no policy — it is runc, the Nix builder is
@@ -103,17 +104,15 @@ not engine behavior. See
 
 Rust. Core dependencies (candidates):
 
-- **Runtime — `libcrun` (crun) via FFI.** A mature C runtime reached through a
-  thin FFI shim (`csrc/shim.c`, `src/runtime/crun.rs`) and driven in-process:
-  construct the OCI config in memory, serialize it to a JSON string, call
-  `libcrun_container_load_from_memory` + create/start. No `config.json` on disk,
-  no subprocess. libcrun is also the fastest backend measured (see
+- **Runtime — the `crun` binary.** A mature C runtime driven as a subprocess
+  (`src/runtime/crun.rs`): construct the OCI config in memory, serialize it to a
+  `config.json` in the per-run bundle dir, and exec `crun run` against it. crun is
+  also the fastest backend measured (see
   [startup-performance.md](startup-performance.md)). See
   [runtime backend](#runtime-backend) for why crun is fixed and youki dropped.
 - **`oci-spec`** — the `oci_spec::runtime::Spec` types crun consumes. We build
-  these in memory from the pierogi spec, then serialize them to a JSON **string**
-  passed to `libcrun_container_load_from_memory`; there is no on-disk
-  `config.json`.
+  these in memory from the pierogi spec, then serialize them to the `config.json`
+  the crun binary reads off disk.
 - **`serde`** — for the synthetic-identity JSON the builders consume, and for
   the serialized `spec` file nix mode reads from the store. Wrap mode may keep
   the spec entirely in memory; the format beyond the identity slice is TBD (see
@@ -133,16 +132,15 @@ Rust. Core dependencies (candidates):
 the intermediate-process model, `pivot_root` edge cases, cgroup v2 delegation,
 and seccomp notify are a deep, security-critical, well-trodden problem. crun has
 solved it and is continuously hardened. Reimplementing it would be the *least*
-differentiated and *most* dangerous code in the project. Bypassing the OCI
-`config.json` file (building the spec in memory and passing it to libcrun as a
-JSON string) keeps the speed and ergonomics we want without re-solving the
-mechanics.
+differentiated and *most* dangerous code in the project. crun has solved it, so
+we build the OCI spec in memory and hand it off as a `config.json` — keeping the
+speed and ergonomics we want without re-solving the mechanics.
 
 **Threading note:** namespace and `pivot_root` operations are per-thread and
 interact badly with multi-threaded runtimes — which is exactly why crun owns the
-delicate fork/clone process model. crun is C, so we drive it **via FFI** rather
-than as an in-process Rust library; the shim keeps that boundary narrow and the
-runtime owns the intermediate/init process where the per-thread syscalls happen.
+delicate fork/clone process model. Driving crun as a subprocess keeps that
+boundary clean: crun owns the intermediate/init process where the per-thread
+syscalls happen, in its own address space.
 
 ## Spec & rootfs (build-time vs runtime)
 
@@ -263,12 +261,13 @@ Pierogi does not issue those syscalls itself.
    - seccomp profile → `linux.seccomp`
    - capability drop → `process.capabilities` (usually empty), `noNewPrivileges`
    - argv/cwd/env → `process`
-   This struct lives only in memory; it is the runtime's input, not a file.
+   This struct is built in memory, then serialized to a `config.json` in the
+   per-run bundle dir — the crun binary reads its config off disk.
 
 **Runtime-owned step (the handoff):**
 
-5. **Drive crun** (`libcrun_container_load_from_memory` on the in-memory JSON,
-   then libcrun create → start via the FFI shim). The runtime sets up namespaces
+5. **Drive crun** (write the `config.json`, then exec `crun run` against the
+   bundle as a subprocess). The runtime sets up namespaces
    in the correct order,
    writes id maps with `setgroups deny`, builds and `pivot_root`s the rootfs,
    loads the seccomp filter, drops capabilities, and `exec`s the target. When
@@ -389,11 +388,15 @@ it is shaped by real usage rather than guessed up front.
 
 ## Runtime backend
 
-The runtime is **crun** (libcrun), and only crun. There is no backend trait or
-abstraction: the OCI spec is built in memory, serialized to a JSON string, and
-handed to `libcrun_container_load_from_memory` through an FFI shim
-(`csrc/shim.c`, `src/runtime/crun.rs`). crun is C, so this is FFI rather than an
-in-process Rust library.
+The runtime is **crun**, and only crun. There is no backend trait or
+abstraction: the OCI spec is built in memory, serialized to a `config.json` in
+the per-run bundle dir, and run by exec'ing the `crun` binary as a subprocess
+(`src/runtime/crun.rs`). An earlier design linked `libcrun` in-process via an FFI
+shim (spec kept in memory, no `config.json`, no subprocess); a head-to-head
+benchmark showed that saved only ~a few milliseconds — within the noise of the
+namespace/mount setup that dominates startup — so it was dropped for the plain
+binary, along with the C shim, the harvested libcrun dev tree, and the linking
+(see [startup-performance.md](startup-performance.md)).
 
 **Why crun, and why youki was dropped.** youki's `libcontainer` was the earlier
 candidate (pure Rust, in-process, no FFI). It was dropped because it could not
@@ -409,13 +412,14 @@ it isolated is what keeps the core auditable.
 ## What the Engine deliberately does NOT do
 
 - **No reimplementing low-level container mechanics *today*.** namespaces,
-  cgroups, `pivot_root`, seccomp load, and `exec` are delegated to the embedded
-  runtime — a security-cost decision, not a permanent refusal. If a hand-rolled
-  path can meet the security bar it's back on the table (see the runtime
-  discussion above).
-- **No OCI bundle on disk, no runtime CLI.** We build the OCI spec in memory,
-  serialize it to a JSON string, and drive crun as a library via FFI — no
-  `config.json`, no `crun run` subprocess.
+  cgroups, `pivot_root`, seccomp load, and `exec` are delegated to crun — a
+  security-cost decision, not a permanent refusal. If a hand-rolled path can meet
+  the security bar it's back on the table (see the runtime discussion above).
+- **No bundle rootfs, minimal on-disk footprint.** We build the OCI spec in
+  memory and serialize it to a `config.json` in a per-run bundle dir — nothing
+  beyond that config and crun's state dir touches disk. The bundle carries no
+  rootfs (`root.path` is the absolute store path); crun still needs a dir to
+  chdir into, but it is otherwise empty.
 - No image building, no layer cache, no registry.
 - No long-lived daemon or supervisor-of-supervisors; one Engine process per
   launched sandbox, which hands off to the runtime and supervises only proxies.
@@ -430,9 +434,9 @@ it isolated is what keeps the core auditable.
 ## Open questions
 
 **Runtime embedding — answered by the M0 spike.** The runtime backend is settled:
-crun via FFI (`libcrun_container_load_from_memory` on an in-memory JSON string, no
-bundle dir, rootless by default), youki dropped (see
-[runtime backend](#runtime-backend)). What remains open around the runtime:
+the crun binary driven as a subprocess (OCI spec built in memory, serialized to a
+`config.json`, `crun run` exec'd against it, rootless by default), youki dropped
+(see [runtime backend](#runtime-backend)). What remains open around the runtime:
 
 - **How much does crun's process model cost us?** crun uses an intermediate +
   init process; measure whether that fits the single-digit-ms cold-start budget

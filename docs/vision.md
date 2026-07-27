@@ -78,11 +78,11 @@ deliberately aspirational and only make sense once the spec/closure model
 - **Reinventing the runtime is a *cost*, not a blanket refusal.** The goal is
   namespaces by any means that clears the security bar; owning the low-level
   namespace/cgroup/seccomp/`exec` mechanics is a large security-critical surface,
-  so *by default* we delegate to an embedded runtime driven as a library (config
-  built in memory, no `config.json`). Hand-rolling stays a live option if it can
-  meet that bar. The runtime is crun (libcrun), driven as an embedded library
-  via FFI with its config passed in memory as a JSON string — no `config.json`
-  — see [architecture.md](architecture.md).
+  so *by default* we delegate to an existing runtime (config built in memory,
+  serialized to a `config.json` per run). Hand-rolling stays a live option if it
+  can meet that bar. The runtime is crun, driven as a subprocess: the OCI spec is
+  built in memory, serialized to a `config.json`, and `crun run` is exec'd against
+  it — see [architecture.md](architecture.md).
 - **No *ambient* or *blanket* escape hatches.** Exposing host `/etc`, host
   `/home`, or the raw D-Bus socket is *possible* — the engine is a pure realizer
   and binds what a spec declares — but never as a default, never as a one-word

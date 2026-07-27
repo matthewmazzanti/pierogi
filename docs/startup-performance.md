@@ -24,12 +24,12 @@ cost on top of the workload itself.
 
 ## How to measure
 
-**Convention:** the **libcrun** figures here are hyperfine-measured. The
+**Convention:** the **crun** figures here are hyperfine-measured. The
 cross-tool comparison in [Where we sit](#where-we-sit) is order-of-magnitude
-**estimate** for every tool *except* our own measured libcrun row. (The youki
+**estimate** for every tool *except* our own measured crun row. (The youki
 row is a historical measurement from when youki was still a candidate backend.)
 
-`bench.sh` (needs `nix develop` for hyperfine + `$CRUN_DEV`):
+`bench.sh` (needs `nix develop` for hyperfine + the pinned crun binary):
 
 - **Run a pre-baked spec.** The closure is baked into the spec at build time, so
   the timed loop measures the runtime backend directly — there is no launch-time
@@ -51,7 +51,7 @@ Numbers are crun, closure-query stubbed, from the read-only store unless noted.
 | # | Lever | Cost | Status |
 |---|-------|------|--------|
 | 1 | `nix-store` closure query | ~35 ms | **Removed** — closure is pre-baked at build time; no launch-time query |
-| 2 | cgroup setup | ~12.5 ms | **Fixed** — `force_no_cgroup` (we request no limits) |
+| 2 | cgroup setup | ~12.5 ms | **Fixed** — we request no limits, so no cgroup is created |
 | 3 | memfd self-copy (CVE-2019-5736) | ~8 ms | **Fixed for free** — auto-skipped from a read-only FS |
 | 4 | binary size | ~2–3 ms | Minor — only when the memfd copy fires (writable FS); irrelevant from the store |
 | 5 | criu / systemd DSO load | ~0 ms | **No-op** — measured negligible; keep criu |
@@ -73,9 +73,12 @@ of an unbuilt spec fails loud rather than falling back to a live query.
 ### 2. cgroups (~12.5 ms) — pure waste today
 
 Our spec requests zero resource limits, yet crun still created and populated a
-cgroup. Setting `force_no_cgroup` (and `no_new_keyring`) in the shim dropped
-crun from ~33 ms → ~20 ms. Almost all of it was **idle time** — the cgroup
-machinery blocking, not computing.
+cgroup. Suppressing it dropped crun from ~33 ms → ~20 ms — almost all **idle
+time**, the cgroup machinery blocking rather than computing. (In the earlier
+in-process design this was libcrun's `force_no_cgroup` / `no_new_keyring` context
+flags; under the crun binary it follows from the config requesting no resources
+and crun's rootless cgroup handling. Worth re-isolating under the binary if the
+number regresses.)
 
 This is the right default *for the spike*. When M4 (hardening) adds resource
 limits it becomes conditional: skip the cgroup only when the spec declares no
@@ -85,15 +88,16 @@ limits.
 
 To mitigate CVE-2019-5736, crun copies its own executable into a sealed `memfd`
 and re-execs it, so a malicious container can't overwrite the host runtime via
-`/proc/self/exe`. Because libcrun is linked into pierogi, "the runtime binary"
-*is* pierogi — so it was copying our whole ~9.6 MB binary every run.
+`/proc/self/exe`. In the earlier in-process design libcrun was linked into
+pierogi, so "the runtime binary" *was* pierogi and crun copied our whole ~9.6 MB
+binary every run — which the benchmark paid because `./target/...` sits on a
+writable filesystem. Now that crun is a separate binary, it is the thing copied.
 
 crun's `is_self_cloned()` skips this when `/proc/self/exe` is on a **read-only
 filesystem** (an immutable binary can't be tampered with, so the protection is
-unnecessary). The Nix store is read-only — so in production, where pierogi runs
-from the store, the copy is skipped automatically. No flag, no patch, no
-security downgrade. The benchmark only paid it because `./target/...` is on a
-writable filesystem.
+unnecessary). The crun binary is pinned to a `/nix/store` path (`CRUN_BIN`),
+which is always read-only — so the self-copy is skipped automatically, in the
+benchmark and in production alike. No flag, no patch, no security downgrade.
 
 (Setting the `_LIBCONTAINER_CLONED_BINARY=1` sentinel does *not* work: crun also
 requires the file to have no hardlinks, which an on-disk binary has. The
@@ -101,27 +105,28 @@ read-only-FS path is the real mechanism.)
 
 ### 5. criu / systemd DSO load (~0 ms) — measured, not assumed
 
-`libcrun.so` eagerly loads `libcriu` + `libprotobuf-c` (and `libsystemd`) as
-`DT_NEEDED` — they're in pierogi's startup DSO graph even though we never
-checkpoint or use systemd. Hypothesis: dropping them speeds startup. **Measured:
-it does not** — removing systemd entirely (and attempting to drop criu) moved
-startup by ~0 ms (11.7 vs 11.5 ms). DSO mapping is microseconds and PLT binding
-is lazy; the ~9 ms System time is mounts + clone + exec, not library loading.
+The `crun` binary eagerly loads `libcriu` + `libprotobuf-c` (and `libsystemd`)
+as `DT_NEEDED` — they're in crun's startup DSO graph (paid on every exec) even
+though we never checkpoint or use systemd. Hypothesis: dropping them speeds
+startup. **Measured: it does not** — removing systemd entirely (and attempting to
+drop criu) moved startup by ~0 ms (11.7 vs 11.5 ms). DSO mapping is microseconds
+and PLT binding is lazy; the ~9 ms System time is mounts + clone + exec, not
+library loading.
 
 Consequences:
 
 - **Keep criu** — it costs nothing at startup and preserves the checkpoint/
   restore path (fast-start via restore; browser/Steam session snapshots).
-- **Static-linking the crun stack won't help startup** — its only speed benefit
+- **A statically-linked crun won't help startup** — its only speed benefit
   would be eliminating DSO-load cost, which is already free. (It would also force
-  dropping systemd/criu, which lack practical static archives, and reopen the
-  link-chain work we collapsed to `-lcrun` via `--enable-shared`.) Not worth it
-  for performance.
+  dropping systemd/criu, which lack practical static archives.) We depend on
+  stock `pkgs.crun` and there's no performance reason to build a custom one. Not
+  worth it.
 
 ## Where we sit
 
 Order-of-magnitude — hardware/config varies, but the tiers hold. **Every row is
-an estimate except the measured pierogi / libcrun row**, a hyperfine number from
+an estimate except the measured pierogi / crun row**, a hyperfine number from
 our spike. (The youki row is a *historical* measurement — youki was evaluated and
 dropped, so it's no longer a live backend option; see below.)
 
