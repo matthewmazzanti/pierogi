@@ -94,38 +94,32 @@ let
     root = root;
   };
 
+# The runnable artifact (this file's sole output) — a wrapper that discovers the
+# host Wayland socket, binds it into the sandbox at the baked mountpoint, then
+# execs `pierogi run`. The compositor's socket is the host unix socket at
+# `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`; inside it's always `/run/user/1000/
+# wayland-0` (the baked path + spec env), so the host's display name never
+# leaks into the image. Trailing `"$@"` is the args-only override, forwarded to
+# `wayland-info` (e.g. `--tag` / a specific interface); the executable is
+# sealed by the spec.
 in
-{
-  # The built spec (closure stamped in). Internal: the input the runner execs
-  # against.
-  inherit resolved;
+pkgs.writeShellScriptBin "pierogi-wayland-sandbox" ''
+  set -eu
 
-  # The runnable artifact — a wrapper that discovers the host Wayland socket,
-  # binds it into the sandbox at the baked mountpoint, then execs `pierogi run`.
-  # The compositor's socket is the host unix socket at
-  # `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`; inside it's always `/run/user/1000/
-  # wayland-0` (the baked path + spec env), so the host's display name never
-  # leaks into the image. Trailing `"$@"` is the args-only override, forwarded to
-  # `wayland-info` (e.g. `--tag` / a specific interface); the executable is
-  # sealed by the spec.
-  runnable = pkgs.writeShellScriptBin "pierogi-wayland-sandbox" ''
-    set -eu
+  # Fail loud if there's no session to route in — a clearer message than the
+  # bind failing deeper in crun.
+  : "''${XDG_RUNTIME_DIR:?not set — is a Wayland session running?}"
+  display="''${WAYLAND_DISPLAY:-wayland-0}"
+  case "$display" in
+    /*) sock="$display" ;;
+    *)  sock="$XDG_RUNTIME_DIR/$display" ;;
+  esac
+  if [ ! -S "$sock" ]; then
+    echo "pierogi-wayland-sandbox: no Wayland socket at $sock" >&2
+    exit 1
+  fi
 
-    # Fail loud if there's no session to route in — a clearer message than the
-    # bind failing deeper in crun.
-    : "''${XDG_RUNTIME_DIR:?not set — is a Wayland session running?}"
-    display="''${WAYLAND_DISPLAY:-wayland-0}"
-    case "$display" in
-      /*) sock="$display" ;;
-      *)  sock="$XDG_RUNTIME_DIR/$display" ;;
-    esac
-    if [ ! -S "$sock" ]; then
-      echo "pierogi-wayland-sandbox: no Wayland socket at $sock" >&2
-      exit 1
-    fi
-
-    exec ${pierogi}/bin/pierogi run ${resolved} \
-      --mount "host:$sock:/run/user/1000/wayland-0:rw" \
-      -- "$@"
-  '';
-}
+  exec ${pierogi}/bin/pierogi run ${resolved} \
+    --mount "host:$sock:/run/user/1000/wayland-0:rw" \
+    -- "$@"
+''

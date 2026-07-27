@@ -159,37 +159,33 @@ let
     root = root;
   };
 
+# The runnable artifact (this file's sole output) — same socket-discovery
+# wrapper as `wayland.nix`: find the host's Wayland socket, bind it onto the
+# baked mountpoint, exec `pierogi run foot`. Trailing `"$@"` is the args-only
+# override, forwarded to foot (options, or a command to run instead of the shell
+# — e.g. `nix run .#foot-sandbox -- bash -c 'echo hi'`).
 in
-{
-  inherit resolved;
+pkgs.writeShellScriptBin "pierogi-foot-sandbox" ''
+  set -eu
 
-  # The runnable artifact — same socket-discovery wrapper as `wayland-sandbox`:
-  # find the host's Wayland socket, bind it onto the baked mountpoint, exec
-  # `pierogi run foot`. Trailing `"$@"` is the args-only override, forwarded to
-  # foot (options, or a command to run instead of the shell — e.g.
-  # `nix run .#foot-sandbox -- bash -c 'echo hi'`).
-  runnable = pkgs.writeShellScriptBin "pierogi-foot-sandbox" ''
-    set -eu
+  : "''${XDG_RUNTIME_DIR:?not set — is a Wayland session running?}"
+  display="''${WAYLAND_DISPLAY:-wayland-0}"
+  case "$display" in
+    /*) sock="$display" ;;
+    *)  sock="$XDG_RUNTIME_DIR/$display" ;;
+  esac
+  if [ ! -S "$sock" ]; then
+    echo "pierogi-foot-sandbox: no Wayland socket at $sock" >&2
+    exit 1
+  fi
 
-    : "''${XDG_RUNTIME_DIR:?not set — is a Wayland session running?}"
-    display="''${WAYLAND_DISPLAY:-wayland-0}"
-    case "$display" in
-      /*) sock="$display" ;;
-      *)  sock="$XDG_RUNTIME_DIR/$display" ;;
-    esac
-    if [ ! -S "$sock" ]; then
-      echo "pierogi-foot-sandbox: no Wayland socket at $sock" >&2
-      exit 1
-    fi
+  # Persistent state: a local (gitignored) dir bound to /root — foot's cwd +
+  # HOME. Override the location with $PIEROGI_STATE.
+  state="''${PIEROGI_STATE:-$PWD/state/foot-sandbox}"
+  mkdir -p "$state"
 
-    # Persistent state: a local (gitignored) dir bound to /root — foot's cwd +
-    # HOME. Override the location with $PIEROGI_STATE.
-    state="''${PIEROGI_STATE:-$PWD/state/foot-sandbox}"
-    mkdir -p "$state"
-
-    exec ${pierogi}/bin/pierogi run ${resolved} \
-      --mount "host:$sock:/run/user/1000/wayland-0:rw" \
-      --mount "host:$state:/root:rw" \
-      -- "$@"
-  '';
-}
+  exec ${pierogi}/bin/pierogi run ${resolved} \
+    --mount "host:$sock:/run/user/1000/wayland-0:rw" \
+    --mount "host:$state:/root:rw" \
+    -- "$@"
+''

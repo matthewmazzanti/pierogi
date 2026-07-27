@@ -147,33 +147,27 @@ let
     root = root;
   };
 
+# The runnable artifact (this file's sole output) — a wrapper that execs
+# `pierogi run` against the built spec and hands the script's own argv to
+# **bash** inside the sandbox. `"$@"` sits after `--`, so it becomes clap's
+# `last = true` args override — which now replaces `process.args` *only*, keeping
+# the spec's sealed `bash` executable. So `nix run .#bash-sandbox -- -c 'echo
+# hello'` runs `bash -c 'echo hello'`, and a bare `nix run .#bash-sandbox` (empty
+# `$@`) leaves the spec's args as-is and launches the default interactive bash
+# (sourcing /etc/bashrc). The closure is sealed into `resolved` at build time;
+# the wrapper adds no policy of its own.
 in
-{
-  # The built spec (closure stamped in). Internal: the input the `runnable`
-  # wrapper execs `pierogi run` against. Not a flake output — the runnable is
-  # the only exported artifact.
-  inherit resolved;
+pkgs.writeShellScriptBin "pierogi-bash-sandbox" ''
+  set -eu
 
-  # The runnable artifact — a wrapper that execs `pierogi run` against the built
-  # spec and hands the script's own argv to **bash** inside the sandbox. `"$@"`
-  # sits after `--`, so it becomes clap's `last = true` args override — which now
-  # replaces `process.args` *only*, keeping the spec's sealed `bash` executable.
-  # So `nix run .#bash-sandbox -- -c 'echo hello'` runs `bash -c 'echo hello'`,
-  # and a bare `nix run .#bash-sandbox` (empty `$@`) leaves the spec's args as-is
-  # and launches the default interactive bash (sourcing /etc/bashrc). The closure
-  # is sealed into `resolved` at build time; the wrapper adds no policy of its own.
-  runnable = pkgs.writeShellScriptBin "pierogi-bash-sandbox" ''
-    set -eu
+  # Persistent state: a local (gitignored) dir bound to /root — the sandbox's
+  # cwd + HOME. Anything written there survives the container. Defaults under
+  # the invocation dir (the repo's gitignored `state/`); override with
+  # $PIEROGI_STATE.
+  state="''${PIEROGI_STATE:-$PWD/state/bash-sandbox}"
+  mkdir -p "$state"
 
-    # Persistent state: a local (gitignored) dir bound to /root — the sandbox's
-    # cwd + HOME. Anything written there survives the container. Defaults under
-    # the invocation dir (the repo's gitignored `state/`); override with
-    # $PIEROGI_STATE.
-    state="''${PIEROGI_STATE:-$PWD/state/bash-sandbox}"
-    mkdir -p "$state"
-
-    exec ${pierogi}/bin/pierogi run ${resolved} \
-      --mount "host:$state:/root:rw" \
-      -- "$@"
-  '';
-}
+  exec ${pierogi}/bin/pierogi run ${resolved} \
+    --mount "host:$state:/root:rw" \
+    -- "$@"
+''

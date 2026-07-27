@@ -41,38 +41,31 @@
             # tests hit nix-store / namespaces — not build-sandbox friendly.
             doCheck = false;
           };
-          # M1 tire-kicker: a static bash + coreutils sandbox with a sealed
-          # rootfs (baked /etc + mountpoints). Yields the built spec.json.
-          bashSandbox = import ./nix/sandbox/bash.nix { inherit pkgs pierogi; };
-          # M1 tire-kicker: a wayland-info sandbox that routes the host Wayland
-          # socket in (baked socket mountpoint + a runtime host bind).
-          waylandSandbox = import ./nix/sandbox/wayland.nix { inherit pkgs pierogi; };
-          # M1 tire-kicker: foot — a graphical Wayland terminal over the same
-          # socket routing, plus a baked font / fontconfig / terminfo userland.
-          footSandbox = import ./nix/sandbox/foot.nix { inherit pkgs pierogi; };
-          # M1 tire-kicker: ghostty — a GPU (OpenGL) Wayland terminal. Adds the
-          # AMD render node (/dev/dri/renderD128) + a seeded Mesa driver on top of
-          # foot's socket/font userland.
-          ghosttySandbox = import ./nix/sandbox/ghostty.nix { inherit pkgs pierogi; };
         in {
           inherit pierogi;
-          # A wrapper that execs `pierogi run` against the pre-baked spec.json
-          # (closure stamped in), forwarding args. `nix run .#bash-sandbox` — or
-          # `… -- --env FOO=bar -- ls` to pass the `run` bridge's overrides. The
-          # built spec is the only runnable form (no live-query path); this just
-          # pairs it with the pierogi binary that runs it.
-          bash-sandbox = bashSandbox.runnable;
-          # A wrapper that binds the host Wayland socket in, then execs
-          # `pierogi run wayland-info` — a smoke test for socket routing. Run
-          # inside a Wayland session: `nix run .#wayland-sandbox`.
-          wayland-sandbox = waylandSandbox.runnable;
-          # A graphical Wayland terminal (foot) over the routed socket. Run
-          # inside a Wayland session: `nix run .#foot-sandbox` (opens a window).
-          foot-sandbox = footSandbox.runnable;
-          # A GPU-accelerated Wayland terminal (ghostty) over the routed socket,
-          # with the AMD render node bound in. Run inside a Wayland session:
+          # Each sandbox file evaluates directly to its runnable wrapper — a
+          # `writeShellScriptBin` that execs `pierogi run` against the pre-baked
+          # spec (closure stamped in at build), forwarding args. The built spec is
+          # the only runnable form (no live-query path); the wrapper just pairs it
+          # with the pierogi binary that runs it.
+
+          # M1 tire-kicker: a static bash + coreutils sandbox with a sealed rootfs
+          # (baked /etc + mountpoints). `nix run .#bash-sandbox` — or
+          # `… -- -c 'echo hi'` to pass args to bash.
+          bash-sandbox = import ./nix/sandbox/bash.nix { inherit pkgs pierogi; };
+          # M1 tire-kicker: a wayland-info sandbox that routes the host Wayland
+          # socket in (baked socket mountpoint + a runtime host bind) — a smoke
+          # test for socket routing. Run inside a Wayland session.
+          wayland-sandbox = import ./nix/sandbox/wayland.nix { inherit pkgs pierogi; };
+          # M1 tire-kicker: foot — a graphical Wayland terminal over the same
+          # socket routing, plus a baked font / fontconfig / terminfo userland.
+          # Run inside a Wayland session: `nix run .#foot-sandbox` (opens a window).
+          foot-sandbox = import ./nix/sandbox/foot.nix { inherit pkgs pierogi; };
+          # M1 tire-kicker: ghostty — a GPU (OpenGL) Wayland terminal. Adds the
+          # AMD render node (/dev/dri/renderD128) + a seeded Mesa driver on top of
+          # foot's socket/font userland. Run inside a Wayland session:
           # `nix run .#ghostty-sandbox` (opens a window).
-          ghostty-sandbox = ghosttySandbox.runnable;
+          ghostty-sandbox = import ./nix/sandbox/ghostty.nix { inherit pkgs pierogi; };
         });
 
       devShells = forAll (system:

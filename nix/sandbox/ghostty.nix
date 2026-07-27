@@ -256,46 +256,43 @@ let
     extraSeeds = [ pkgs.mesa ];
   };
 
+# The runnable artifact (this file's sole output) — same socket-discovery
+# wrapper as `foot.nix`, plus a render-node pre-check: find the host's Wayland
+# socket, bind it onto the baked mountpoint, bind persistent state to /root, exec
+# `pierogi run ghostty`. The render node itself is a sealed placement (stable
+# path), so the wrapper only verifies it exists for a clear error. Trailing
+# `"$@"` is the args-only override, forwarded to ghostty (e.g.
+# `nix run .#ghostty-sandbox -- +version`).
 in
-{
-  inherit resolved;
+pkgs.writeShellScriptBin "pierogi-ghostty-sandbox" ''
+  set -eu
 
-  # The runnable artifact — same socket-discovery wrapper as `foot-sandbox`, plus
-  # a render-node pre-check: find the host's Wayland socket, bind it onto the
-  # baked mountpoint, bind persistent state to /root, exec `pierogi run ghostty`.
-  # The render node itself is a sealed placement (stable path), so the wrapper
-  # only verifies it exists for a clear error. Trailing `"$@"` is the args-only
-  # override, forwarded to ghostty (e.g. `nix run .#ghostty-sandbox -- +version`).
-  runnable = pkgs.writeShellScriptBin "pierogi-ghostty-sandbox" ''
-    set -eu
+  : "''${XDG_RUNTIME_DIR:?not set — is a Wayland session running?}"
+  display="''${WAYLAND_DISPLAY:-wayland-0}"
+  case "$display" in
+    /*) sock="$display" ;;
+    *)  sock="$XDG_RUNTIME_DIR/$display" ;;
+  esac
+  if [ ! -S "$sock" ]; then
+    echo "pierogi-ghostty-sandbox: no Wayland socket at $sock" >&2
+    exit 1
+  fi
 
-    : "''${XDG_RUNTIME_DIR:?not set — is a Wayland session running?}"
-    display="''${WAYLAND_DISPLAY:-wayland-0}"
-    case "$display" in
-      /*) sock="$display" ;;
-      *)  sock="$XDG_RUNTIME_DIR/$display" ;;
-    esac
-    if [ ! -S "$sock" ]; then
-      echo "pierogi-ghostty-sandbox: no Wayland socket at $sock" >&2
-      exit 1
-    fi
+  # The render node is bound in by the sealed spec (a stable-path placement).
+  # Fail loud here with a clearer message than the bind failing deeper in crun.
+  if [ ! -e /dev/dri/renderD128 ]; then
+    echo "pierogi-ghostty-sandbox: no render node at /dev/dri/renderD128 — is this an AMD/Intel (Mesa) GPU host?" >&2
+    exit 1
+  fi
 
-    # The render node is bound in by the sealed spec (a stable-path placement).
-    # Fail loud here with a clearer message than the bind failing deeper in crun.
-    if [ ! -e /dev/dri/renderD128 ]; then
-      echo "pierogi-ghostty-sandbox: no render node at /dev/dri/renderD128 — is this an AMD/Intel (Mesa) GPU host?" >&2
-      exit 1
-    fi
+  # Persistent state: a local (gitignored) dir bound to /root — ghostty's cwd +
+  # HOME (config under .config, data under .local/share). Override with
+  # $PIEROGI_STATE.
+  state="''${PIEROGI_STATE:-$PWD/state/ghostty-sandbox}"
+  mkdir -p "$state"
 
-    # Persistent state: a local (gitignored) dir bound to /root — ghostty's cwd +
-    # HOME (config under .config, data under .local/share). Override with
-    # $PIEROGI_STATE.
-    state="''${PIEROGI_STATE:-$PWD/state/ghostty-sandbox}"
-    mkdir -p "$state"
-
-    exec ${pierogi}/bin/pierogi run ${resolved} \
-      --mount "host:$sock:/run/user/1000/wayland-0:rw" \
-      --mount "host:$state:/root:rw" \
-      -- "$@"
-  '';
-}
+  exec ${pierogi}/bin/pierogi run ${resolved} \
+    --mount "host:$sock:/run/user/1000/wayland-0:rw" \
+    --mount "host:$state:/root:rw" \
+    -- "$@"
+''
