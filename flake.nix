@@ -66,6 +66,35 @@
           # foot's socket/font userland. Run inside a Wayland session:
           # `nix run .#ghostty-sandbox` (opens a window).
           ghostty-sandbox = import ./nix/sandbox/ghostty.nix { inherit pkgs pierogi; };
+
+          # --- axis probes: minimal, single-use testers, each isolating one
+          # config axis with the smallest test tool that gives a clean pass/fail
+          # (see nix/probe/*.nix headers). ---
+
+          # GPU-userspace trilogy: the same exposed render node (/sys + seeded
+          # Mesa, NO Wayland), each resolving the driver a different way.
+          #   GL/EGL via glvnd vendor JSON — `nix run .#egl-probe`.
+          egl-probe = import ./nix/probe/egl.nix { inherit pkgs pierogi; };
+          #   Vulkan via the ICD loader manifest — `nix run .#vulkan-probe`.
+          vulkan-probe = import ./nix/probe/vulkan.nix { inherit pkgs pierogi; };
+          #   VA-API (hardware video) via a libva driver .so — `nix run .#vainfo-probe`.
+          vainfo-probe = import ./nix/probe/vainfo.nix { inherit pkgs pierogi; };
+
+          # fontconfig: font resolution isolated (no display/GPU) —
+          # `fc-match monospace`. `nix run .#fontconfig-probe`.
+          fontconfig-probe = import ./nix/probe/fontconfig.nix { inherit pkgs pierogi; };
+
+          # Local AF_UNIX socket routers (the wayland.nix pattern, other services):
+          #   D-Bus session bus → dbus-send ListNames. `nix run .#dbus-probe`.
+          dbus-probe = import ./nix/probe/dbus.nix { inherit pkgs pierogi; };
+          #   PipeWire → pw-dump the media graph. `nix run .#pipewire-probe`.
+          pipewire-probe = import ./nix/probe/pipewire.nix { inherit pkgs pierogi; };
+
+          # Wayland-protocol probes over the socket route (run in a Wayland session):
+          #   clipboard / data-device → wl-paste. `nix run .#clipboard-probe`.
+          clipboard-probe = import ./nix/probe/clipboard.nix { inherit pkgs pierogi; };
+          #   wlr-screencopy → grim a PNG (wlroots only). `nix run .#screenshot-probe`.
+          screenshot-probe = import ./nix/probe/screenshot.nix { inherit pkgs pierogi; };
         });
 
       devShells = forAll (system:

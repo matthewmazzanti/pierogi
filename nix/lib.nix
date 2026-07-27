@@ -8,6 +8,8 @@
 #     mountpoint dirs they need baked (`defaultMountDirs`).
 #   * resolving the spec — `exportReferencesGraph` + `pierogi resolve --graph`
 #     (`resolveSpec`), byte-identical across sandboxes.
+#   * the shared GPU-userspace exposure (`gpu`): render-node + `/sys` + Mesa
+#     plumbing the egl / vulkan / vainfo probes share.
 #
 # What is deliberately NOT here anymore: baking a `/nix/store/<hash>` mountpoint
 # tree into the root. The store topology is provided at *runtime* — the engine
@@ -33,7 +35,11 @@ rec {
   # `nodev` (device nodes live there); `devpts` is a foot-style extra (the engine
   # auto-adds one only for `terminal`).
   mounts = {
-    proc = { destination = "/proc"; type = "proc"; source = "proc"; };
+    proc = {
+      destination = "/proc";
+      type = "proc";
+      source = "proc";
+    };
     dev = {
       destination = "/dev";
       type = "tmpfs";
@@ -92,6 +98,93 @@ rec {
     __structuredAttrs = true;
     exportReferencesGraph.closure = seeds;
   } ''
-    ${pierogi}/bin/pierogi resolve ${file} --graph "$NIX_ATTRS_JSON_FILE" > "''${outputs[out]}"
+    ${pierogi}/bin/pierogi resolve ${file} \
+      --graph "$NIX_ATTRS_JSON_FILE" \
+      > "''${outputs[out]}"
   '';
+
+  # Shared GPU exposure for the "GPU userspace" probe trilogy (egl / vulkan /
+  # vainfo) — the render-node + `/sys` + Mesa plumbing a hardware-accelerated
+  # client needs, minus any display. A probe binds `gpu = lib.gpu;` and appends
+  # `gpu.mounts` / `gpu.mountDirs` to the `default*` bundles above.
+  #
+  # (ghostty.nix predates this and inlines equivalent `renderNode` / `sysfs` /
+  # `devShm` definitions plus a Mesa EGL env; it could adopt this later.)
+  #
+  # The three probes all run WITHOUT a Wayland socket — they open the render node
+  # directly, so they isolate "does the GPU userspace resolve the vendor driver"
+  # from "does display routing work" (which `wayland.nix` already covers). Each API
+  # discovers Mesa's driver a DIFFERENT way — that difference IS the axis each
+  # probe exercises:
+  #   * EGL/GL — libglvnd reads the EGL vendor JSON (`__EGL_VENDOR_LIBRARY_DIRS`);
+  #   * Vulkan — the loader reads an ICD manifest (`VK_ICD_FILENAMES`);
+  #   * VA-API — libva `dlopen`s `<driver>_drv_video.so` (`LIBVA_DRIVERS_PATH`).
+  # Mesa is therefore never in a client's build closure — it's an `extraSeed`.
+  #
+  # AMD-specific (renderD128 + radeonsi / radeon_icd), matching ghostty's existing
+  # assumption. An Intel/other host would point these at its own node + driver.
+  gpu = let mesa = pkgs.mesa; in rec {
+    # Mesa — the GL/EGL/Vulkan/VA userspace driver, seeded explicitly (a client
+    # `dlopen`s it at runtime via the manifests below, so it's NOT a build-closure
+    # reference). Pass as `extraSeeds = [ gpu.seed ]` to `resolveSpec`.
+    seed = mesa;
+
+    # The AMD render node, bound in as a **device**. Options omit `nodev` — a
+    # device node bound MS_NODEV is inert. Lands on the runtime `/dev` tmpfs, so
+    # crun creates the target at mount time (no baked dir). The node is mode 0666
+    # on the host, so the 1:1-mapped invoker opens it with no capability juggling.
+    renderNode = {
+      destination = "/dev/dri/renderD128";
+      source = "/dev/dri/renderD128";
+      type = "bind";
+      options = [ "bind" "rw" "nosuid" ];
+    };
+
+    # A `/dev/shm` tmpfs — GPU stacks commonly `shm_open`. Mounts onto the `/dev`
+    # tmpfs at runtime, so it needs no baked dir.
+    devShm = {
+      destination = "/dev/shm";
+      type = "tmpfs";
+      source = "tmpfs";
+      options = [ "nosuid" "nodev" "mode=1777" ];
+    };
+
+    # A read-only sysfs — Mesa's loader resolves the render node to its driver via
+    # libdrm, which reads the node's PCI id under `/sys`. Without it, GL/VA fall
+    # back to software (llvmpipe) or fail outright. `profiles.base` already masks
+    # the sensitive `/sys` bits, which activate once `/sys` is mounted. Needs a
+    # baked mountpoint (see `mountDirs`).
+    sysfs = {
+      destination = "/sys";
+      type = "sysfs";
+      source = "sysfs";
+      options = [ "nosuid" "noexec" "nodev" "ro" ];
+    };
+
+    # The mount bundle, ordered so the `/dev`-nested pair follow their parent (the
+    # `/dev` tmpfs in `defaultMounts`). Append to `defaultMounts`.
+    mounts = [ sysfs renderNode devShm ];
+
+    # The mountpoint dirs the sealed root must bake for these: just `/sys`
+    # (renderNode + devShm mount onto the runtime `/dev` tmpfs, so no baked dir).
+    # Append to `defaultMountDirs` in the root's `bake_dirs` call.
+    mountDirs = [ "/sys" ];
+
+    # Per-API driver-discovery env fragments — merge into `process.env`. Each
+    # names Mesa by absolute store path, which is why Mesa must be seeded.
+    eglEnv = {
+      __EGL_VENDOR_LIBRARY_DIRS = "${mesa}/share/glvnd/egl_vendor.d";
+      LIBGL_DRIVERS_PATH = "${mesa}/lib/dri";
+    };
+    # The AMD ICD **only**. Pointing at the whole `icd.d` would let lavapipe
+    # (`lvp`, software) enumerate a device and mask a hardware failure — defeating
+    # the "did we get the GPU" pass/fail signal.
+    vulkanEnv = {
+      VK_ICD_FILENAMES = "${mesa}/share/vulkan/icd.d/radeon_icd.x86_64.json";
+    };
+    vaEnv = {
+      LIBVA_DRIVERS_PATH = "${mesa}/lib/dri";
+      LIBVA_DRIVER_NAME = "radeonsi";
+    };
+  };
 }
