@@ -113,6 +113,10 @@
           # M1 tire-kicker: foot — a graphical Wayland terminal over the same
           # socket routing, plus a baked font / fontconfig / terminfo userland.
           footSandbox = import ./nix/foot-sandbox.nix { inherit pkgs pierogi; };
+          # M1 tire-kicker: ghostty — a GPU (OpenGL) Wayland terminal. Adds the
+          # AMD render node (/dev/dri/renderD128) + a seeded Mesa driver on top of
+          # foot's socket/font userland.
+          ghosttySandbox = import ./nix/ghostty-sandbox.nix { inherit pkgs pierogi; };
         in {
           crun-dev = crunDev;
           inherit pierogi;
@@ -133,6 +137,11 @@
           # inside a Wayland session: `nix run .#foot-sandbox` (opens a window).
           foot-sandbox = footSandbox.runnable;
           foot-sandbox-spec = footSandbox.resolved;
+          # A GPU-accelerated Wayland terminal (ghostty) over the routed socket,
+          # with the AMD render node bound in. Run inside a Wayland session:
+          # `nix run .#ghostty-sandbox` (opens a window).
+          ghostty-sandbox = ghosttySandbox.runnable;
+          ghostty-sandbox-spec = ghosttySandbox.resolved;
         });
 
       devShells = forAll (system:
