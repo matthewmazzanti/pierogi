@@ -131,3 +131,66 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   `std::io::Read` (buffering breaks poll semantics; fds are borrowed
   process-globals). Look for a cleaner combinator, or decide `retry()` is fine
   and just document why.
+
+## dbus filter proxy + runtime identity (M2 / M4)
+
+Context, so it isn't lost: M2 landed the `xdg-dbus-proxy` supervisor
+(`src/dbus.rs`) and a working `nix/probe/dbus.nix`. Making the probe pass
+surfaced that **D-Bus SASL `EXTERNAL` couples the container app-uid to the host
+uid**: the client sends its own `getuid()` in-band (`AUTH EXTERNAL <hex-uid>`,
+confirmed on the wire) *and* the server independently reads `SO_PEERCRED`
+(kernel-translated into the server's namespace), then requires the two to match.
+So uid **normalization** (a goal: the container always sees `1000` regardless of
+the host uid) fights it — the client claims `1000` while the host-side proxy
+reads the real host uid, and the handshake is rejected. The proxy dissolves the
+*upstream* hop (it re-originates the bus connection as the real host uid) but
+re-verifies the *client* against peercred, so routing alone doesn't clear it. The
+probe sidesteps this with an identity map — which passes **only because the test
+host happens to be uid 1000** (`container 1000 → host 1000` is an identity, not a
+real normalization); on a host where the user is e.g. 1001 the probe's approach
+would fail the client→proxy auth. See the `dbus.nix` header for the full writeup.
+
+- [ ] **Fork `xdg-dbus-proxy` to launder the client uid.** Keep the client-side
+  uid **validation** (the sandbox must present the *expected container* uid — no
+  spoofing an arbitrary id), but then **rewrite** the claimed uid to the matching
+  *host* uid before the upstream auth. Concretely it's one SASL line: the client
+  sends `AUTH EXTERNAL <hex container-uid>`; the fork validates it (against the
+  expected container id and peercred), then rewrites to `<hex host-uid>` (or an
+  empty `AUTH EXTERNAL`, which makes the bus fall back to peercred) on its
+  upstream connection. This **preserves normalization** (container keeps seeing
+  1000) while satisfying the bus's `EXTERNAL` check — the proxy is already the
+  identity seam (it re-auths upstream as the host user), so laundering the
+  client's claimed id belongs there. Do it in a fork rather than a front-shim to
+  keep it one component. The rewrite needs a **container↔host uid/gid map**. Like
+  the OCI `{uid,gid}_mappings`, but — following the theme (engine holds no policy,
+  producer curates) — **independent of the engine's mappings** (not auto-derived
+  from them) and **pinned via the Nix layer** (producer data: a field on the
+  `dbus` section, or a sibling, authored in `profiles.*`). That keeps the D-Bus
+  uid translation an explicit, auditable producer choice, not an implicit
+  coupling to the sandbox's id map. (Alternatives considered and deferred: run the
+  proxy inside the sandbox's userns — only works if its upstream auth is empty-
+  `EXTERNAL`, and re-plumbs supervision; or drop normalization for D-Bus sandboxes
+  via an identity map — cheapest but concedes the normalization goal for exactly
+  the sandboxes that want the bus.)
+
+- [ ] **Reconsider `self` and how runtime-only values enter — argument
+  overrides.** `self` (`HostId::Invoker`, resolved to `getuid()`/`getgid()` by the
+  engine at launch — `src/spec.rs`, `src/oci.rs`) is a bit of a wart: an in-band
+  sentinel the engine resolves by **querying the host**, a small crack in the
+  "engine holds no policy, runs no host query" line. The same shape recurs in
+  `BusAddress::Session`/`System` (the engine reads `$DBUS_SESSION_BUS_ADDRESS` /
+  the well-known path at launch — `src/dbus.rs`). Intuition to develop: **runtime
+  values are supplied as args** — genuinely launch-time-only values (the invoker
+  uid/gid, the host session/system bus address, the host Wayland socket) should
+  enter through the explicit CLI-override / "runtime producer" channel
+  (like `--env`/`--mount`/`--hostname`), keeping the spec static/pinned and the
+  engine free of implicit host resolution. Then `self` dissolves: the caller/
+  wrapper passes the concrete uid as an override. Needs a **principled** split,
+  not a point fix — the clean cut looks like: *build-time/producer* values live in
+  Nix (static, auditable — e.g. the normalized container uid `1000`), *genuinely-
+  runtime* values (unknowable until launch — the invoker's real uid, host socket
+  addrs) come in as launch args. `self` today conflates the two by having the
+  engine auto-resolve the runtime half in-band. This interacts with the proxy fork
+  above: that uid map has a build-time half (the normalized container id → Nix) and
+  a runtime half (the host invoker id → arg), same seam. Work out the model before
+  touching the schema.
