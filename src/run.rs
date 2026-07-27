@@ -90,8 +90,10 @@ fn launch(mut spec: Spec) -> Result<()> {
     // each socket exists when the container's bind resolves. A spec with no `dbus`
     // makes this a no-op; the proxies are supervised for the run and torn down
     // after crun returns (or on any early `?`-return, via `DbusProxies`' Drop).
-    let proxies = crate::dbus::DbusProxies::start(&spec.dbus, uid, &work)?;
-    spec.mounts.extend(proxies.mounts());
+    let proxies = crate::dbus::start(&spec.dbus, uid, &work)?;
+    for proxy in &proxies {
+        spec.mounts.push(proxy.mount()?);
+    }
 
     let oci = build_spec(&RealizeInputs {
         spec: &spec,
@@ -119,9 +121,9 @@ fn launch(mut spec: Spec) -> Result<()> {
         relay.finish();
     }
 
-    // Tear the proxies down (kill + reap) before removing the work dir their
-    // sockets live in.
-    proxies.finish();
+    // Tear the proxies down (each `Proxy`'s Drop kills + reaps) before removing
+    // the work dir their sockets live in.
+    drop(proxies);
 
     // Best-effort cleanup.
     let _ = std::fs::remove_dir_all(&work);
