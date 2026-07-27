@@ -1,4 +1,8 @@
-//! crun backend: run a resolved OCI spec by exec'ing the `crun` binary.
+//! The runtime: drive a resolved OCI spec to a running, namespaced process by
+//! exec'ing the `crun` binary. One backend, crun, and only crun — youki was
+//! evaluated but couldn't RO-remount a `/nix/store` rootfs (its bare
+//! `MS_REMOUNT|MS_RDONLY` hits the store's kernel-locked `nosuid`/`nodev` flags);
+//! crun re-supplies the flags and handles it.
 //!
 //! pierogi links nothing from crun — it materializes the spec as a `config.json`
 //! and drives the `crun` CLI as a subprocess. (An earlier design linked
@@ -7,6 +11,10 @@
 //! namespace/mount setup — so the shim, the harvested libcrun dev tree, and the
 //! `--enable-shared` build override were dropped for the plain binary. See
 //! `docs/startup-performance.md`.)
+//!
+//! [`run`] returns the container's exit code. When the spec asks for a terminal,
+//! `console_socket` is the path crun connects to and sends the pty master over
+//! (see [`crate::tty`]).
 //!
 //! The crun binary reads its config off disk, so we write the OCI JSON to
 //! `<bundle>/config.json` and point crun at it with an **absolute** `-f`: crun

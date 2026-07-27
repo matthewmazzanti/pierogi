@@ -105,7 +105,7 @@ not engine behavior. See
 Rust. Core dependencies (candidates):
 
 - **Runtime — the `crun` binary.** A mature C runtime driven as a subprocess
-  (`src/runtime/crun.rs`): construct the OCI config in memory, serialize it to a
+  (`src/crun.rs`): construct the OCI config in memory, serialize it to a
   `config.json` in the per-run bundle dir, and exec `crun run` against it. crun is
   also the fastest backend measured (see
   [startup-performance.md](startup-performance.md)). See
@@ -391,7 +391,7 @@ it is shaped by real usage rather than guessed up front.
 The runtime is **crun**, and only crun. There is no backend trait or
 abstraction: the OCI spec is built in memory, serialized to a `config.json` in
 the per-run bundle dir, and run by exec'ing the `crun` binary as a subprocess
-(`src/runtime/crun.rs`). An earlier design linked `libcrun` in-process via an FFI
+(`src/crun.rs`). An earlier design linked `libcrun` in-process via an FFI
 shim (spec kept in memory, no `config.json`, no subprocess); a head-to-head
 benchmark showed that saved only ~a few milliseconds — within the noise of the
 namespace/mount setup that dominates startup — so it was dropped for the plain

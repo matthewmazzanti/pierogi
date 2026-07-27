@@ -74,7 +74,7 @@ closure under `/nix/store` and a writable tmpfs `/tmp`, `/dev`, and `/proc`.
 
 ```
 src/            # the pierogi crate: resolve, spec, oci translation, run, tty relay
-src/runtime/    # crun backend (execs the crun binary as a subprocess)
+src/crun.rs     # crun backend (execs the crun binary as a subprocess)
 nix/            # bash-sandbox.nix — the sealed-rootfs build pipeline
 flake.nix .envrc# dev shell: rust toolchain (crun binary pinned via CRUN_BIN)
 docs/           # vision / architecture / execution-modes / spec / control-surface / roadmap

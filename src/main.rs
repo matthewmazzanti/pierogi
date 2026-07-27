@@ -3,7 +3,7 @@
 //! Drives an OCI runtime (the `crun` binary) from Rust to namespace + `exec` a
 //! process over a **sealed `/nix/store` rootfs** (see `docs/spec.md`). One
 //! backend: pierogi writes the OCI spec to a `config.json` and execs `crun`
-//! (`src/runtime/crun.rs`). youki was evaluated and dropped — it can't RO-remount
+//! (`src/crun.rs`). youki was evaluated and dropped — it can't RO-remount
 //! a store rootfs; an earlier design linked libcrun in-process to keep the spec
 //! in memory, dropped once benchmarking showed the process boundary costs only a
 //! few milliseconds (see `docs/startup-performance.md`).
@@ -14,11 +14,11 @@
 //!   runtime populate its default device nodes.
 //! * **cgroups.** Work via systemd user-session delegation (rootless).
 
+mod crun;
 mod oci;
 mod overrides;
 mod resolve;
 mod run;
-mod runtime;
 mod spec;
 mod tty;
 

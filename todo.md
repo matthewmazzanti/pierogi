@@ -121,7 +121,7 @@ scaffold; `--mount store:` dropped; closure frozen at build time. See
   use its `ioctl!` macros); `sigaction` install/uninstall; the eventfd counter
   bump in the handler (async-signal-safe, must stay raw). The old crun FFI shim
   (`csrc/shim.c`) was the largest unsafe surface; it's gone now that crun is
-  driven as a subprocess (`runtime/crun.rs` shells out — no C boundary). Goal:
+  driven as a subprocess (`crun.rs` shells out — no C boundary). Goal:
   shrink the remaining count where it's a real reduction, not just relocation.
 
 - [ ] **Find a better pattern for `retry()`.** The manual EINTR-retry loop wraps

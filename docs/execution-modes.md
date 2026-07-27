@@ -41,7 +41,7 @@ store path   ─┘    (+ strict defaults,     → stamp closure           (spec
 - **Spec / Engine:** `build_spec()` builds the in-memory OCI spec (`src/spec.rs`)
   and **crun** drives it — the OCI spec is serialized to a `config.json` in the
   per-run bundle dir and the `crun` binary is exec'd against it (`crun run`),
-  `src/runtime/{mod,crun}.rs`. crun only — no runtime abstraction. Identical for
+  `src/crun.rs`. crun only — no runtime abstraction. Identical for
   all modes.
 
 **Key invariant:** the security-critical core (resolve onward) never learns which

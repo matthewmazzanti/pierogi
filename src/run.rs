@@ -102,7 +102,7 @@ fn launch(spec: Spec) -> Result<()> {
 
     // Drive crun: the backend writes the spec to `work/config.json`, execs the
     // crun binary, and blocks until the container exits.
-    let result = crate::runtime::run(&oci, &id, &work, &state, console);
+    let result = crate::crun::run(&oci, &id, &work, &state, console);
 
     // Restore the terminal (join the relay) before anything else prints.
     if let Some(relay) = relay {
