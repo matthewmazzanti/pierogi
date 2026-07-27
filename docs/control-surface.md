@@ -160,7 +160,7 @@ ranges) is the M4 producer work.
 | Masked `/proc`, `/sys` bits | `linux.maskedPaths` | pass-through; `base` sets runc's list | `unmask` list (see note) |
 | Read-only `/proc` bits | `linux.readonlyPaths` | pass-through; `base` sets the list | — (see note) |
 | No new privileges | `process.noNewPrivileges` | pass-through; `base` sets `true` | rarely; explicit |
-| Caps dropped | `process.capabilities` = ∅ | pass-through; `base` sets `[]` | `cap_add` list |
+| Caps dropped | `process.capabilities` = ∅ | pass-through; `base` empties all five sets | add the cap to the sets it needs |
 | Default-deny seccomp | `linux.seccomp` | pass-through; profile curated in **M4** | `seccomp: none` / profile (see note) |
 | `nosuid,nodev` on mounts | mount `options` | producer-set (CLI/`base`); closure binds implicit | per-mount (producer) |
 | No core dumps | `RLIMIT_CORE = 0` | pass-through; `base` sets it | explicit rlimit |

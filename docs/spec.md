@@ -63,7 +63,7 @@ struct Process {                           // OCI process (execve split + map/li
     user:              Option<User>,       // process.user            (oci_spec type)
     cwd:               Option<PathBuf>,    // process.cwd, absent => /
     env:               BTreeMap<String, String>, // process.env (a MAP here); PATH lives here
-    capabilities:      Option<Vec<String>>,// process.capabilities as add-list; Some([]) = drop-all
+    capabilities:      Option<LinuxCapabilities>, // process.capabilities, the five OCI sets (oci_spec type)
     rlimits:           Vec<PosixRlimit>,   // process.rlimits         (oci_spec type)
     no_new_privileges: Option<bool>,       // process.noNewPrivileges
     oom_score_adj:     Option<i32>,        // process.oomScoreAdj
@@ -98,7 +98,7 @@ enum   HostId    { Numeric(u32), Invoker /* "self" */ }
 
 Deliberate divergences from a literal OCI mirror: `root.path` is a `StorePath`;
 argv keeps the **execve** split (`process.executable` + `args`, vs OCI's single
-`args`); `process.env` is a map and `process.capabilities` an add-list.
+`args`); `process.env` is a map.
 
 **There is no custom `Mount` type.** A `Host` bind, a `Tmpfs`, an overlay
 (`type: "overlay"` with `lowerdir`/`upperdir`/`workdir` in `options`), and an
@@ -129,9 +129,11 @@ lower) needs its closure bound, the producer adds it to `closure.seeds`. See
 - **OCI pass-throughs** (`no_new_privileges`, `capabilities`, `rlimits`,
   `masked_paths`, `readonly_paths`, `rootfs_propagation`, `namespaces`,
   `uid_mappings`, `gid_mappings`, `seccomp`, `devices`) — each projects verbatim
-  to the matching OCI field, `absent = absent`. `capabilities: Some([])` means
-  **drop all** (distinct from absent). `namespaces`/`seccomp`/`devices`/`rlimits`
-  reuse `oci_spec` types. An id-mapping `host` may be `"self"` — the invoking
+  to the matching OCI field, `absent = absent`. `capabilities` is the full OCI
+  `LinuxCapabilities` (the five sets `bounding`/`effective`/`inheritable`/
+  `permitted`/`ambient`); an empty set **drops all** in it (distinct from absent).
+  `capabilities`/`namespaces`/`seccomp`/`devices`/`rlimits` reuse `oci_spec`
+  types. An id-mapping `host` may be `"self"` — the invoking
   user's id, resolved at launch. **The floor these carry comes from a producer**
   (`profiles.base`), never the engine.
 - **`root`** — a single, **required** store path: the **rootfs**. The FHS-root

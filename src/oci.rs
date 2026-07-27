@@ -32,13 +32,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use oci_spec::runtime::{
-    Capabilities, Capability, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxIdMapping,
-    LinuxIdMappingBuilder, Mount as OciMount, MountBuilder, ProcessBuilder, RootBuilder,
-    Spec as OciSpec, SpecBuilder, UserBuilder,
+    LinuxBuilder, LinuxIdMapping, LinuxIdMappingBuilder, Mount as OciMount, MountBuilder,
+    ProcessBuilder, RootBuilder, Spec as OciSpec, SpecBuilder, UserBuilder,
 };
 
 use crate::spec::{HostId, IdMapping, Spec};
@@ -153,7 +151,9 @@ pub fn build_spec(input: &RealizeInputs) -> Result<OciSpec> {
     // Neutralize oci-spec's Process::default() (nnp=true, 3 caps, a nofile
     // rlimit): emit exactly what the spec carries, or nothing.
     process.set_no_new_privileges(proc.no_new_privileges);
-    process.set_capabilities(build_capabilities(proc.capabilities.as_deref())?);
+    // Verbatim OCI: the five capability sets pass straight through (None emits
+    // nothing, neutralizing oci-spec's 3-cap Process::default()).
+    process.set_capabilities(proc.capabilities.clone());
     process.set_rlimits(non_empty(proc.rlimits.clone()));
     process.set_oom_score_adj(proc.oom_score_adj);
 
@@ -218,37 +218,6 @@ fn build_id_mappings(specs: &[IdMapping], invoker: u32) -> Result<Vec<LinuxIdMap
         .collect()
 }
 
-/// `spec.capabilities` → `process.capabilities`. `None` → `None` (emit nothing);
-/// `Some(names)` → the same set in every capability list (`Some([])` drops all).
-fn build_capabilities(
-    names: Option<&[String]>,
-) -> Result<Option<oci_spec::runtime::LinuxCapabilities>> {
-    let Some(names) = names else {
-        return Ok(None);
-    };
-    let caps: Capabilities = names
-        .iter()
-        .map(|n| parse_cap(n))
-        .collect::<Result<_>>()?;
-    Ok(Some(
-        LinuxCapabilitiesBuilder::default()
-            .bounding(caps.clone())
-            .effective(caps.clone())
-            .permitted(caps.clone())
-            .inheritable(caps.clone())
-            .ambient(caps)
-            .build()?,
-    ))
-}
-
-/// Parse a capability name — accepts `NET_BIND_SERVICE`, `CAP_NET_BIND_SERVICE`,
-/// or lowercase, normalizing to the OCI enum. Fail loud on unknown.
-fn parse_cap(name: &str) -> Result<Capability> {
-    let upper = name.trim().to_uppercase();
-    let bare = upper.strip_prefix("CAP_").unwrap_or(&upper);
-    Capability::from_str(bare).map_err(|_| anyhow::anyhow!("unknown capability {name:?}"))
-}
-
 fn devpts_mount() -> Result<OciMount> {
     Ok(MountBuilder::default()
         .destination(PathBuf::from("/dev/pts"))
@@ -277,7 +246,10 @@ fn bind_mount(dest: &str, source: &str, options: &[String]) -> Result<OciMount> 
 mod tests {
     use super::*;
     use crate::spec::{Closure, Linux, Process, Root, StorePath};
-    use oci_spec::runtime::{LinuxNamespaceBuilder, LinuxNamespaceType};
+    use oci_spec::runtime::{
+        Capabilities, Capability, LinuxCapabilitiesBuilder, LinuxNamespaceBuilder,
+        LinuxNamespaceType,
+    };
     use std::collections::BTreeMap;
 
     /// A minimal resolved spec with no pass-throughs set (a raw, profile-less
@@ -342,7 +314,12 @@ mod tests {
         spec.root.readonly = Some(true);
         spec.process.no_new_privileges = Some(true);
         spec.hostname = Some("box".into());
-        spec.process.capabilities = Some(vec!["NET_BIND_SERVICE".into()]);
+        spec.process.capabilities = Some(
+            LinuxCapabilitiesBuilder::default()
+                .bounding([Capability::NetBindService])
+                .build()
+                .unwrap(),
+        );
         spec.linux.masked_paths = vec!["/proc/kcore".into()];
         spec.linux.namespaces = vec![LinuxNamespaceBuilder::default()
             .typ(LinuxNamespaceType::User)
@@ -404,7 +381,13 @@ mod tests {
     #[test]
     fn drop_all_caps_is_distinct_from_absent() {
         let mut spec = bare_resolved_spec();
-        spec.process.capabilities = Some(vec![]); // drop-all
+        // drop-all: an empty bounding set is Some (a block), distinct from absent.
+        spec.process.capabilities = Some(
+            LinuxCapabilitiesBuilder::default()
+                .bounding(Capabilities::default())
+                .build()
+                .unwrap(),
+        );
         let oci = build_spec(&RealizeInputs {
             spec: &spec,
             uid: 1,
@@ -420,19 +403,6 @@ mod tests {
             .as_ref()
             .expect("drop-all still emits an (empty) capabilities block");
         assert!(caps.bounding().as_ref().unwrap().is_empty());
-    }
-
-    #[test]
-    fn unknown_capability_fails_loud() {
-        let mut spec = bare_resolved_spec();
-        spec.process.capabilities = Some(vec!["NOT_A_CAP".into()]);
-        assert!(build_spec(&RealizeInputs {
-            spec: &spec,
-            uid: 1,
-            gid: 1,
-            store_root: Path::new("/run/pierogi-test/store"),
-        })
-        .is_err());
     }
 
     #[test]

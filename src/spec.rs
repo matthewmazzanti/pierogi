@@ -8,12 +8,12 @@
 //! — it's `profiles.base` in the Nix producer layer, composed into a spec before
 //! the engine sees it. See `docs/control-surface.md`.
 //!
-//! Verbatim-OCI leaves reuse `oci_spec` types directly (`User`, `LinuxSeccomp`,
-//! `LinuxDevice`, `LinuxResources`, `LinuxNamespace`, `PosixRlimit`,
-//! `LinuxNetDevice`, `LinuxPersonality`, `Mount`). Deliberate divergences from a
-//! literal OCI mirror: `root.path` is a `StorePath` (the sealed rootfs);
-//! `process.executable` + `process.args` keep the **execve** split; `process.env`
-//! is a map and `process.capabilities` an add-list (ergonomics); id-mapping `host`
+//! Verbatim-OCI leaves reuse `oci_spec` types directly (`User`,
+//! `LinuxCapabilities`, `LinuxSeccomp`, `LinuxDevice`, `LinuxResources`,
+//! `LinuxNamespace`, `PosixRlimit`, `LinuxNetDevice`, `LinuxPersonality`,
+//! `Mount`). Deliberate divergences from a literal OCI mirror: `root.path` is a
+//! `StorePath` (the sealed rootfs); `process.executable` + `process.args` keep
+//! the **execve** split; `process.env` is a map (ergonomics); id-mapping `host`
 //! admits `"self"`. `deny_unknown_fields` at every level turns an unmodeled OCI
 //! field into a hard error rather than a silent drop.
 
@@ -22,8 +22,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use oci_spec::runtime::{
-    LinuxDevice, LinuxNamespace, LinuxNetDevice, LinuxPersonality, LinuxResources, LinuxSeccomp,
-    Mount as OciMount, PosixRlimit, User,
+    LinuxCapabilities, LinuxDevice, LinuxNamespace, LinuxNetDevice, LinuxPersonality,
+    LinuxResources, LinuxSeccomp, Mount as OciMount, PosixRlimit, User,
 };
 use serde::{Deserialize, Serialize};
 
@@ -143,11 +143,14 @@ pub struct Process {
     /// is the single source of truth for `executable`.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// `process.capabilities` as an **add-list** (names without `CAP_`). `None` →
-    /// not emitted; `Some([])` → drop all; `Some([names])` → exactly those (the
-    /// engine puts each in every capability set).
+    /// `process.capabilities`, verbatim OCI (`LinuxCapabilities` — the five sets
+    /// `bounding`/`effective`/`inheritable`/`permitted`/`ambient`, each an
+    /// optional set of `CAP_*` names). `None` → not emitted (the OCI runtime's
+    /// default applies); `Some` → exactly those sets, an absent set left absent
+    /// and an empty set dropping all in it. The engine passes it straight
+    /// through; the curated posture is a producer concern (`profiles.base`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<Vec<String>>,
+    pub capabilities: Option<LinuxCapabilities>,
     /// `process.rlimits`, verbatim OCI.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rlimits: Vec<PosixRlimit>,
@@ -318,7 +321,11 @@ mod tests {
         let json = r#"{
             "root": { "path": "/nix/store/aaaa-r", "readonly": true },
             "process": {
-                "executable": "bash", "no_new_privileges": true, "capabilities": [],
+                "executable": "bash", "no_new_privileges": true,
+                "capabilities": {
+                    "bounding": ["CAP_NET_BIND_SERVICE"], "effective": ["CAP_NET_BIND_SERVICE"],
+                    "permitted": ["CAP_NET_BIND_SERVICE"], "inheritable": [], "ambient": []
+                },
                 "oom_score_adj": -500,
                 "user": { "uid": 1000, "gid": 100, "umask": 18, "additionalGids": [5], "username": "dev" },
                 "rlimits": [ { "type": "RLIMIT_CORE", "soft": 0, "hard": 0 } ]
@@ -337,7 +344,14 @@ mod tests {
         }"#;
         let spec: Spec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.root.readonly, Some(true));
-        assert_eq!(spec.process.capabilities.as_deref(), Some(&[][..])); // drop-all
+        // The full five-set structure: only NET_BIND_SERVICE kept, others empty.
+        let caps = spec.process.capabilities.as_ref().unwrap();
+        assert!(caps
+            .bounding()
+            .as_ref()
+            .unwrap()
+            .contains(&oci_spec::runtime::Capability::NetBindService));
+        assert!(caps.ambient().as_ref().unwrap().is_empty()); // dropped
         assert_eq!(spec.process.oom_score_adj, Some(-500));
         assert_eq!(spec.process.user.as_ref().unwrap().username().as_deref(), Some("dev"));
         assert_eq!(spec.linux.masked_paths, ["/proc/kcore"]);
@@ -348,7 +362,7 @@ mod tests {
         assert!(spec.linux.resources.is_some());
         assert_eq!(spec.linux.sysctl.get("net.ipv4.ip_forward").unwrap(), "0");
         assert_eq!(spec.domainname.as_deref(), Some("box.local"));
-        // round-trips (self stays "self", drop-all stays []).
+        // round-trips (self stays "self", the capability sets survive).
         let back = serde_json::to_string(&spec).unwrap();
         assert!(back.contains(r#""host":"self""#));
         let _again: Spec = serde_json::from_str(&back).unwrap();

@@ -26,9 +26,16 @@
 
     process = {
       no_new_privileges = true;
-      # Drop every capability ([] = the empty set, distinct from "absent"). Add
-      # back per-profile if a workload genuinely needs one.
-      capabilities = [ ];
+      # Drop every capability: each OCI set is the empty set (distinct from
+      # "absent"). Add back per-profile — put the cap in the sets a workload
+      # genuinely needs (typically `bounding` + `effective` + `permitted`).
+      capabilities = {
+        bounding = [ ];
+        effective = [ ];
+        inheritable = [ ];
+        permitted = [ ];
+        ambient = [ ];
+      };
       # No core dumps (the one always-available rootless rlimit floor).
       rlimits = [ { type = "RLIMIT_CORE"; soft = 0; hard = 0; } ];
     };
