@@ -264,6 +264,7 @@ mod tests {
                 seeds: vec![StorePath::new("/nix/store/aaaa-root").unwrap()],
                 resolved: Some(vec![StorePath::new("/nix/store/aaaa-root").unwrap()]),
             },
+            dbus: Vec::new(),
             process: Process {
                 executable: "bash".into(),
                 args: vec![],

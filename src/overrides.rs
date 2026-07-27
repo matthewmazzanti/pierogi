@@ -203,6 +203,7 @@ mod tests {
             linux: Linux::default(),
             mounts: vec![],
             closure: Closure::default(),
+            dbus: Vec::new(),
         }
     }
 

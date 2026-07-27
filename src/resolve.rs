@@ -149,6 +149,7 @@ mod tests {
                 seeds: vec![path],
                 resolved: None,
             },
+            dbus: Vec::new(),
             process: Process {
                 executable: "bash".into(),
                 args: vec![],

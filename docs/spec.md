@@ -478,10 +478,21 @@ runnable form.
   resolves the old "root-as-mount" question: `root` is now *structurally special*
   (the `/` mount), not just another store bind. See
   [Realization](#realization-what-the-engine-does).
+- **DECIDED (M2) — `dbus` filter proxies.** A non-OCI carve-out beside `closure`:
+  a list of supervised `xdg-dbus-proxy` bus/socket pairs, each an independently-
+  filtered bus routed into the sandbox (`src/spec.rs`, `DbusProxy`/`BusAddress`/
+  `DbusPolicy`). Shape mirrors the proxy — a *list* (the proxy takes N `BUSADDR
+  SOCKETPATH` groups; session + system are the canonical two, plus the a11y/custom
+  bus) and *rule-kind-major* policy (`see`/`talk`/`own`/`call`/`broadcast`, a
+  literal transcription of its flags). The engine holds no policy: the buckets are
+  filled by the Nix layer, `--filter` is always engaged (mechanism, not policy),
+  and `bus: "session"|"system"` are launch-time sentinels (the `host: "self"`
+  precedent) so the host address is never baked. Engine supervision (spawn,
+  `--fd` ready-sync, socket bind, teardown) is still to land (`src/dbus.rs`).
 - **TODO — the rest of the runtime surface.** `hostname`, `tty`, `working_dir`,
   and `read_only` are now folded into the flat schema (compose-flavoured); still
-  outstanding: namespaces, uid/gid maps (`user`), dbus/seccomp rules — present in
-  the engine today (`src/spec.rs`/`src/oci.rs`) but not yet spec fields. Add per
+  outstanding: namespaces, uid/gid maps (`user`), seccomp rules — present in the
+  engine today (`src/spec.rs`/`src/oci.rs`) but not yet spec fields. Add per
   feature/milestone, running each through
   [control-surface.md](control-surface.md)'s litmus.
 - **TODO — wire format.** JSON vs other, and public-contract status — deferred to

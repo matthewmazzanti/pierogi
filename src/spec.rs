@@ -1,12 +1,13 @@
 //! The typed pierogi **Spec** — the v0 schema (see `docs/spec.md`).
 //!
 //! The spec **mirrors the OCI runtime spec's structure** — `root`, `process`,
-//! `linux`, `mounts`, `hostname`, … — plus one nix carve-out, `closure`. The
-//! engine is a **pure realizer** (`docs/architecture.md`'s third principle): it
-//! holds **no policy** and projects whatever the spec carries into the OCI spec,
-//! `absent = absent`. The default-closed floor is not here and not in the engine
-//! — it's `profiles.base` in the Nix producer layer, composed into a spec before
-//! the engine sees it. See `docs/control-surface.md`.
+//! `linux`, `mounts`, `hostname`, … — plus two non-OCI carve-outs: `closure`
+//! (the Nix store view) and `dbus` (the filter proxies). The engine is a **pure
+//! realizer** (`docs/architecture.md`'s third principle): it holds **no policy**
+//! and projects whatever the spec carries into the OCI spec, `absent = absent`.
+//! The default-closed floor is not here and not in the engine — it's
+//! `profiles.base` in the Nix producer layer, composed into a spec before the
+//! engine sees it. See `docs/control-surface.md`.
 //!
 //! Verbatim-OCI leaves reuse `oci_spec` types directly (`User`,
 //! `LinuxCapabilities`, `LinuxSeccomp`, `LinuxDevice`, `LinuxResources`,
@@ -100,10 +101,17 @@ pub struct Spec {
     /// Linux-specific knobs (OCI `linux`).
     #[serde(default)]
     pub linux: Linux,
-    /// The Nix store view — the one **carve-out** (not OCI). `seeds` is a
-    /// build-time input; `resolved` is stamped by `resolve --graph`.
+    /// The Nix store view — a **carve-out** (not OCI). `seeds` is a build-time
+    /// input; `resolved` is stamped by `resolve --graph`.
     #[serde(default)]
     pub closure: Closure,
+    /// D-Bus filter proxies — a **carve-out** (not OCI; D-Bus proxying has no
+    /// OCI representation). A list of supervised `xdg-dbus-proxy` bus/socket
+    /// pairs, each an independently-filtered bus routed into the sandbox. Absent
+    /// or empty ⇒ no bus in the sandbox — deny-all is the *absence* of a proxy,
+    /// not an engine policy. See [`DbusProxy`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dbus: Vec<DbusProxy>,
 }
 
 /// The rootfs (OCI `root`). `path` is a sealed store path mounted at `/` and
@@ -228,6 +236,121 @@ pub struct Closure {
     /// fails loud — build with `resolve --graph`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<Vec<StorePath>>,
+}
+
+/// One supervised `xdg-dbus-proxy` bus/socket pair.
+///
+/// **The engine mirrors the proxy, holds no policy.** Just as the rest of the
+/// spec mirrors the OCI runtime (the realizer for everything else), the `dbus`
+/// section mirrors `xdg-dbus-proxy`'s own model — its realizer. So the shape is
+/// a *list* of bus/socket pairs (the proxy takes N `BUSADDR SOCKETPATH` groups),
+/// and the policy is *rule-kind-major* (one bucket per proxy flag), a literal
+/// transcription of the CLI rather than any grouping pierogi invents. The Nix
+/// producer layer (`profiles.*`) is the policy engine — it fills the buckets; the
+/// engine only translates them to argv and supervises the process.
+///
+/// **Why a list.** Session + system are two distinct buses at two distinct
+/// in-sandbox paths, each with an independent allowlist (`docs/architecture.md`,
+/// `docs/roadmap.md` M2); the a11y bus or a custom address are occasional further
+/// entries. A fixed `{ session, system }` struct would bake "there are exactly
+/// two well-known buses" into the engine — a policy-shaped assumption that belongs
+/// in Nix. The list mirrors the proxy and lets the producer decide how many
+/// entries exist and what each is. (How the engine runs the list — one process
+/// with N pairs vs. N processes — is a supervision detail, invisible here.)
+///
+/// **`--filter` is always engaged** — mechanism, not policy. An entry with an
+/// empty [`DbusPolicy`] still filters: the sandbox can connect and complete the
+/// SASL handshake but talk to nothing. A non-filtering proxy would be a raw
+/// socket with a uid fix — the exact escape hatch the project refuses — so
+/// "the filter is on" is the engine's mechanism; the *rules* are the policy, and
+/// they live here in the spec.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbusProxy {
+    /// The host bus the proxy connects to (its upstream). A [`BusAddress`].
+    pub bus: BusAddress,
+    /// Where the proxy's filtered socket lands **inside** the sandbox — a baked
+    /// mountpoint the engine binds the socket onto (e.g. `/run/user/1000/bus`
+    /// for the session bus, `/run/dbus/system_bus_socket` for the system bus).
+    /// The client reaches the bus here; the host bus address never leaks in.
+    pub socket: PathBuf,
+    /// The allowlist. Absent ⇒ deny-all (connect + authenticate, talk to
+    /// nothing) — the filter is still engaged (see the type note).
+    #[serde(default)]
+    pub policy: DbusPolicy,
+}
+
+/// The upstream host bus of a [`DbusProxy`] — where the proxy connects.
+///
+/// `Session`/`System` are launch-time sentinels, the [`HostId::Invoker`]
+/// precedent applied to the bus: the spec records the auditable word
+/// (`"session"`) while the engine resolves the concrete host path at launch
+/// (`$DBUS_SESSION_BUS_ADDRESS`, or `/run/user/<uid>/bus`; the well-known system
+/// socket) — so the host address is never baked into the artifact. `Address`
+/// carries an explicit `unix:path=…`/`unix:abstract=…` bus address verbatim (the
+/// a11y bus, a nested bus, a test daemon).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BusAddress {
+    /// `"session"` — the user's session bus, resolved at launch.
+    Session,
+    /// `"system"` — the machine's system bus, resolved at launch.
+    System,
+    /// An explicit D-Bus address (`unix:path=…`), verbatim.
+    Address(String),
+}
+
+impl Serialize for BusAddress {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            BusAddress::Session => s.serialize_str("session"),
+            BusAddress::System => s.serialize_str("system"),
+            BusAddress::Address(addr) => s.serialize_str(addr),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BusAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        // The sentinels are bare words; a real bus address always contains a
+        // transport prefix (`unix:`, `tcp:`, …), so there is no collision.
+        let s = String::deserialize(de)?;
+        Ok(match s.as_str() {
+            "session" => BusAddress::Session,
+            "system" => BusAddress::System,
+            _ => BusAddress::Address(s),
+        })
+    }
+}
+
+/// A D-Bus allowlist — **rule-kind-major**, one bucket per `xdg-dbus-proxy`
+/// policy flag, a literal transcription of the CLI (`docs/architecture.md`'s
+/// pure-realizer principle: the engine mirrors the tool, the Nix layer curates).
+///
+/// Access is hierarchical `see < talk < own`; `call`/`broadcast` add
+/// method/signal-level rules on top of a name the app can already talk to. Names
+/// accept `xdg-dbus-proxy` wildcards (`org.foo.*`). Every bucket is additive and
+/// defaults empty — nothing here is a floor the engine supplies.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbusPolicy {
+    /// `--see=NAME` — the app may know the name exists (enumerate / `GetNameOwner`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub see: Vec<String>,
+    /// `--talk=NAME` — the app may send messages to the name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub talk: Vec<String>,
+    /// `--own=NAME` — the app may own the name (and receive messages to it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own: Vec<String>,
+    /// `--call=NAME=RULE` — method-call rules per name. Each rule in the list
+    /// becomes one `--call=NAME=RULE` flag (e.g. `Notify`, `Interface.*`, `*`).
+    /// `BTreeMap` for deterministic artifacts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub call: BTreeMap<String, Vec<String>>,
+    /// `--broadcast=NAME=RULE` — signal rules per name, same per-name shape as
+    /// `call`. Governs which broadcast signals the app may receive.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub broadcast: BTreeMap<String, Vec<String>>,
 }
 
 /// One `linux.{uid,gid}Mappings` entry: `container` id → `host` id, `size` wide.
@@ -383,5 +506,81 @@ mod tests {
     fn id_mapping_host_rejects_bogus_string() {
         let json = r#"{ "container": 0, "host": "root", "size": 1 }"#;
         assert!(serde_json::from_str::<IdMapping>(json).is_err());
+    }
+
+    #[test]
+    fn dbus_absent_is_absent() {
+        // No `dbus` ⇒ empty list, and it doesn't serialize back (deny-all is the
+        // absence of a proxy, not a value the engine emits).
+        let json = r#"{ "root": {"path":"/nix/store/a"}, "process": {"executable":"b"} }"#;
+        let spec: Spec = serde_json::from_str(json).unwrap();
+        assert!(spec.dbus.is_empty());
+        assert!(!serde_json::to_string(&spec).unwrap().contains("dbus"));
+    }
+
+    #[test]
+    fn dbus_session_and_system_with_independent_policy() {
+        // The canonical two-bus case: session + system, each independently
+        // filtered, at distinct in-sandbox sockets.
+        let json = r#"{
+            "root": { "path": "/nix/store/aaaa-r" },
+            "process": { "executable": "app" },
+            "dbus": [
+                {
+                    "bus": "session",
+                    "socket": "/run/user/1000/bus",
+                    "policy": {
+                        "talk": ["org.freedesktop.Notifications"],
+                        "own": ["org.mpris.MediaPlayer2.app"],
+                        "call": { "org.freedesktop.Notifications": ["Notify"] },
+                        "broadcast": { "org.freedesktop.Notifications": ["*"] }
+                    }
+                },
+                {
+                    "bus": "system",
+                    "socket": "/run/dbus/system_bus_socket",
+                    "policy": { "see": ["org.freedesktop.login1"] }
+                },
+                { "bus": "unix:path=/tmp/a11y", "socket": "/run/user/1000/at-spi/bus" }
+            ]
+        }"#;
+        let spec: Spec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.dbus.len(), 3);
+
+        let session = &spec.dbus[0];
+        assert_eq!(session.bus, BusAddress::Session);
+        assert_eq!(session.socket, PathBuf::from("/run/user/1000/bus"));
+        assert_eq!(session.policy.talk, ["org.freedesktop.Notifications"]);
+        assert_eq!(
+            session.policy.call.get("org.freedesktop.Notifications").unwrap(),
+            &["Notify"]
+        );
+
+        assert_eq!(spec.dbus[1].bus, BusAddress::System);
+        // A third bus with no `policy` ⇒ deny-all (filter engaged, empty buckets).
+        assert_eq!(
+            spec.dbus[2].bus,
+            BusAddress::Address("unix:path=/tmp/a11y".into())
+        );
+        assert!(spec.dbus[2].policy.talk.is_empty());
+
+        // Sentinels round-trip as bare words; an explicit address stays verbatim.
+        let back = serde_json::to_string(&spec).unwrap();
+        assert!(back.contains(r#""bus":"session""#));
+        assert!(back.contains(r#""bus":"system""#));
+        assert!(back.contains(r#""bus":"unix:path=/tmp/a11y""#));
+        let _again: Spec = serde_json::from_str(&back).unwrap();
+    }
+
+    #[test]
+    fn dbus_rejects_unknown_policy_field() {
+        // deny_unknown_fields: a mistyped rule kind fails loud, not silently.
+        let json = r#"{
+            "root": { "path": "/nix/store/a" },
+            "process": { "executable": "b" },
+            "dbus": [ { "bus": "session", "socket": "/run/user/1000/bus",
+                        "policy": { "tolk": ["org.foo"] } } ]
+        }"#;
+        assert!(serde_json::from_str::<Spec>(json).is_err());
     }
 }
