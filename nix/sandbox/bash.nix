@@ -65,10 +65,10 @@ let
 
   # The minimal-but-usable terminal userland (shell, coreutils, pager, text
   # tools, tree, ncurses+terminfo) — shared with the foot sandbox.
-  terminalTools = import ./terminal-tools.nix { inherit pkgs; };
+  terminalTools = import ../terminal-tools.nix { inherit pkgs; };
 
   # Light-touch resolution utilities (build shell + resolveSpec).
-  lib = import ./lib.nix { inherit pkgs pierogi; };
+  lib = import ../lib.nix { inherit pkgs pierogi; };
 
   # root: the tree the author designs — a /bin symlink farm, hand-rolled /etc,
   # and the base mountpoint dirs (incl. an empty /nix/store, the engine's store
@@ -103,7 +103,7 @@ let
 
   # The default-closed floor, as spec fields — the engine holds no policy, so
   # the sandbox is hardened *because* it composes this (see nix/profiles.nix).
-  profiles = import ./profiles.nix { };
+  profiles = import ../profiles.nix { };
 
   # The sources spec: `profiles.base` (the floor) merged with this sandbox's own
   # fields. `root.path` and `closure` are injected by `lib.resolveSpec`, so
@@ -149,8 +149,9 @@ let
 
 in
 {
-  # The built spec (closure stamped in). Internal: the input the runner execs
-  # against, and the artifact `bench.sh` / `resolve --graph` inspection consume.
+  # The built spec (closure stamped in). Internal: the input the `runnable`
+  # wrapper execs `pierogi run` against. Not a flake output — the runnable is
+  # the only exported artifact.
   inherit resolved;
 
   # The runnable artifact — a wrapper that execs `pierogi run` against the built

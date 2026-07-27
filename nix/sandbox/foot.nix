@@ -1,10 +1,10 @@
 # M1 nix-mode artifact — a foot terminal sandbox (sealed-rootfs edition).
 #
-# The graphical follow-on to `wayland-sandbox.nix`: it reuses that file's Wayland
+# The graphical follow-on to `wayland.nix`: it reuses that file's Wayland
 # socket routing verbatim (baked `/run/user/1000/wayland-0` mountpoint + spec env
 # + a runtime host bind in the wrapper), but runs **foot** — a real Wayland
-# terminal that opens a window. See `wayland-sandbox.nix` for the routing writeup
-# and `bash-sandbox.nix` for the sealed-rootfs pipeline itself.
+# terminal that opens a window. See `wayland.nix` for the routing writeup
+# and `bash.nix` for the sealed-rootfs pipeline itself.
 #
 # foot is CPU/`wl_shm`-rendered, so — unlike an EGL client — it needs **no GPU /
 # `/dev/dri`**. What it does need beyond a routed socket is a small userland:
@@ -71,10 +71,10 @@ let
   # tools, tree, ncurses+terminfo) — shared with the bash sandbox. ncurses'
   # terminfo DB carries the `foot` entry, so no separate `foot.terminfo` output
   # is needed.
-  terminalTools = import ./terminal-tools.nix { inherit pkgs; };
+  terminalTools = import ../terminal-tools.nix { inherit pkgs; };
 
   # Light-touch resolution utilities (build shell + resolveSpec).
-  lib = import ./lib.nix { inherit pkgs pierogi; };
+  lib = import ../lib.nix { inherit pkgs pierogi; };
 
   # root: the tree the author designs — /bin farm, hand-rolled /etc, base
   # mountpoint dirs (incl. an empty /nix/store and the Wayland socket file). It IS
@@ -109,7 +109,7 @@ let
   '';
 
   # The default-closed floor, as spec fields (see nix/profiles.nix).
-  profiles = import ./profiles.nix { };
+  profiles = import ../profiles.nix { };
 
   # The sources spec: `profiles.base` merged with this sandbox's fields.
   # `root.path` + `closure` are injected by `lib.sealAndResolve`.
@@ -152,7 +152,7 @@ let
 
   # Resolve against `root` — `resolveSpec` injects `root.path` + seeds and stamps
   # `closure.resolved` from what `root` references, no dep list. The store
-  # topology is a runtime RO bind, not baked. See bash-sandbox.nix.
+  # topology is a runtime RO bind, not baked. See bash.nix.
   resolved = lib.resolveSpec {
     name = "pierogi-foot-sandbox";
     spec = unresolvedSpec;

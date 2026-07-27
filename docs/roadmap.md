@@ -139,7 +139,7 @@ holds no defaults, and the first Nix policy library (`profiles.base`).
 - [ ] **`profiles.base` (Nix):** the curated default-closed floor as a composable
       attrset (read-only root, nnp, caps `[]`, curated masks/readonly paths,
       rprivate, `RLIMIT_CORE=0`, private namespaces incl. `network`, the
-      `self` 1:1 map). `bash-sandbox.nix` composes it and comes out hardened —
+      `self` 1:1 map). `sandbox/bash.nix` composes it and comes out hardened —
       while the engine decided nothing.
 - [ ] **CLI overrides stay** (`--env`/`--mount`/argv/`--hostname`): a *runtime
       producer* that injects runtime-only changes onto the resolved spec.

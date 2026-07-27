@@ -1,6 +1,6 @@
 # M1 nix-mode artifact — a Wayland-routing sandbox (sealed-rootfs edition).
 #
-# Sibling of `bash-sandbox.nix`: same pipeline (explicit `root` build →
+# Sibling of `bash.nix`: same pipeline (explicit `root` build →
 # `lib.resolveSpec` stamps `closure.resolved` from root's references), so see
 # that file for the full rationale. What's different here is the *point*: it
 # tests **routing a host Wayland socket into the container**.
@@ -33,7 +33,7 @@ let
   '';
 
   # Light-touch resolution utilities (build shell + resolveSpec).
-  lib = import ./lib.nix { inherit pkgs pierogi; };
+  lib = import ../lib.nix { inherit pkgs pierogi; };
 
   # root: the tree the author designs — a /bin farm, hand-rolled /etc, base
   # mountpoint dirs (incl. an empty /nix/store and the Wayland socket file). It IS
@@ -61,7 +61,7 @@ let
   '';
 
   # The default-closed floor, as spec fields (see nix/profiles.nix).
-  profiles = import ./profiles.nix { };
+  profiles = import ../profiles.nix { };
 
   # The sources spec: `profiles.base` merged with this sandbox's fields.
   # `root.path` + `closure` are injected by `lib.sealAndResolve`.
@@ -87,7 +87,7 @@ let
 
   # Resolve against `root` — `resolveSpec` injects `root.path` + seeds and stamps
   # `closure.resolved` from what `root` references, no dep list. The store
-  # topology is a runtime RO bind, not baked. See bash-sandbox.nix.
+  # topology is a runtime RO bind, not baked. See bash.nix.
   resolved = lib.resolveSpec {
     name = "pierogi-wayland-sandbox";
     spec = unresolvedSpec;

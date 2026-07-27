@@ -1,6 +1,6 @@
 # M1 nix-mode artifact — a ghostty terminal sandbox (sealed-rootfs edition).
 #
-# The GPU follow-on to `foot-sandbox.nix`. It reuses foot's Wayland socket
+# The GPU follow-on to `foot.nix`. It reuses foot's Wayland socket
 # routing verbatim (baked `/run/user/1000/wayland-0` mountpoint + spec env + a
 # runtime host bind in the wrapper) and its font / fontconfig userland, but runs
 # **ghostty** — a GTK4 + libadwaita terminal that renders its grid with
@@ -104,10 +104,10 @@ let
 
   # The minimal-but-usable terminal userland (shell, coreutils, pager, text
   # tools, tree, ncurses+terminfo) — shared with the bash/foot sandboxes.
-  terminalTools = import ./terminal-tools.nix { inherit pkgs; };
+  terminalTools = import ../terminal-tools.nix { inherit pkgs; };
 
   # Light-touch resolution utilities (build shell + resolveSpec).
-  lib = import ./lib.nix { inherit pkgs pierogi; };
+  lib = import ../lib.nix { inherit pkgs pierogi; };
 
   # The AMD render node, bound in as a **device**. A producer placement (stable
   # path → sealed, unlike the session-varying Wayland socket). Options omit
@@ -185,7 +185,7 @@ let
 
   # The default-closed floor, as spec fields (see nix/profiles.nix). GL on a
   # render node needs no capabilities and no network, so the base is untouched.
-  profiles = import ./profiles.nix { };
+  profiles = import ../profiles.nix { };
 
   # The sources spec: `profiles.base` merged with this sandbox's fields.
   # `root.path` + `closure` are injected by `lib.resolveSpec`.
@@ -248,7 +248,7 @@ let
   # `root.path`, seeds the closure from `[ root, mesa ]`, and stamps
   # `closure.resolved`. mesa is seeded explicitly because libglvnd loads it at
   # runtime, so root/ghostty don't reference it. The store topology is a runtime
-  # RO bind, not baked. See bash-sandbox.nix.
+  # RO bind, not baked. See bash.nix.
   resolved = lib.resolveSpec {
     name = "pierogi-ghostty-sandbox";
     spec = unresolvedSpec;

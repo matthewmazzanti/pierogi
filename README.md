@@ -30,11 +30,6 @@ nix develop            # or: direnv allow  (.envrc is `use flake`)
 nix run .#bash-sandbox                       # interactive bash (sources /etc/bashrc)
 nix run .#bash-sandbox -- -c 'echo hello'    # args go straight to bash
 
-# Or build just the spec and run it with your own pierogi (full run overrides
-# like --env / --mount live here):
-nix build .#bash-sandbox-spec
-cargo run -- run ./result
-
 # A second example: route the host Wayland socket into the sandbox and run
 # `wayland-info` against your live compositor (needs a Wayland session). The
 # wrapper binds $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY onto a baked socket mountpoint.
@@ -56,7 +51,7 @@ closure under `/nix/store` and a writable tmpfs `/tmp`, `/dev`, and `/proc`.
 - **`pierogi resolve <spec.json> --graph <graph>`** — build a spec: traverse
   Nix's `exportReferencesGraph` (supplied as JSON) from the spec's seeds, stamp
   the resulting closure, and print the frozen spec. This is what a Nix builder
-  calls; see [`nix/bash-sandbox.nix`](nix/bash-sandbox.nix).
+  calls; see [`nix/sandbox/bash.nix`](nix/sandbox/bash.nix).
 
 ### Findings still worth knowing
 
@@ -75,7 +70,7 @@ closure under `/nix/store` and a writable tmpfs `/tmp`, `/dev`, and `/proc`.
 ```
 src/            # the pierogi crate: resolve, spec, oci translation, run, tty relay
 src/crun.rs     # crun backend (execs the crun binary as a subprocess)
-nix/            # bash-sandbox.nix — the sealed-rootfs build pipeline
+nix/            # lib/profiles/terminal-tools + sandbox/ — the sealed-rootfs build pipeline
 flake.nix .envrc# dev shell: rust toolchain (crun binary pinned via CRUN_BIN)
 docs/           # vision / architecture / execution-modes / spec / control-surface / roadmap
 ```
