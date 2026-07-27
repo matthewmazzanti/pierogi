@@ -49,13 +49,15 @@ pub fn resolve_cmd(spec_path: PathBuf, graph_file: PathBuf) -> Result<()> {
 }
 
 /// The mode-agnostic tail: assert built → realize → drive crun → clean up.
-fn launch(spec: Spec) -> Result<()> {
+fn launch(mut spec: Spec) -> Result<()> {
     // Assert the spec is pre-baked (carries `closure.resolved`). There is no
     // runtime query. The exec target is resolved by the runtime against the
     // container's PATH at launch (in-sandbox), not here.
     resolve(&spec)?;
 
-    let resolved = spec.closure.resolved.as_ref().expect("asserted above");
+    // Own the resolved set so `spec.mounts` stays mutable below (the D-Bus proxy
+    // binds are appended before realization).
+    let resolved = spec.closure.resolved.clone().expect("asserted above");
     eprintln!(
         "pierogi: sealed rootfs {} + {} closure binds",
         spec.root.path,
@@ -81,7 +83,15 @@ fn launch(spec: Spec) -> Result<()> {
     // `/nix/store` so the store topology is provided here rather than baked into
     // the sealed root (see `oci::build_spec`).
     let store = work.join("store");
-    scaffold_store(&store, resolved)?;
+    scaffold_store(&store, &resolved)?;
+
+    // Spawn the D-Bus filter proxies (if any) and route their sockets in. Started
+    // *before* realization so their binds join `spec.mounts`, and before crun so
+    // each socket exists when the container's bind resolves. A spec with no `dbus`
+    // makes this a no-op; the proxies are supervised for the run and torn down
+    // after crun returns (or on any early `?`-return, via `DbusProxies`' Drop).
+    let proxies = crate::dbus::DbusProxies::start(&spec.dbus, uid, &work)?;
+    spec.mounts.extend(proxies.mounts());
 
     let oci = build_spec(&RealizeInputs {
         spec: &spec,
@@ -108,6 +118,10 @@ fn launch(spec: Spec) -> Result<()> {
     if let Some(relay) = relay {
         relay.finish();
     }
+
+    // Tear the proxies down (kill + reap) before removing the work dir their
+    // sockets live in.
+    proxies.finish();
 
     // Best-effort cleanup.
     let _ = std::fs::remove_dir_all(&work);

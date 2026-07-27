@@ -38,6 +38,9 @@
             };
             cargoLock.lockFile = ./Cargo.lock;
             CRUN_BIN = "${pkgs.crun}/bin/crun";
+            # the xdg-dbus-proxy binary pierogi supervises for the D-Bus filter
+            # layer (src/dbus.rs), baked in the same way as crun.
+            XDG_DBUS_PROXY_BIN = "${pkgs.xdg-dbus-proxy}/bin/xdg-dbus-proxy";
             # tests hit nix-store / namespaces — not build-sandbox friendly.
             doCheck = false;
           };
@@ -116,11 +119,14 @@
               nix
               # the crun binary pierogi execs (also on PATH for manual runs)
               crun
+              # the xdg-dbus-proxy binary pierogi supervises for the D-Bus layer
+              xdg-dbus-proxy
             ];
 
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-            # the crun binary pierogi bakes in via env! (build.rs re-exports it)
+            # the binaries pierogi bakes in via env! (build.rs re-exports them)
             CRUN_BIN = "${pkgs.crun}/bin/crun";
+            XDG_DBUS_PROXY_BIN = "${pkgs.xdg-dbus-proxy}/bin/xdg-dbus-proxy";
           };
         });
     };

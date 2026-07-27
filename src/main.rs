@@ -15,6 +15,7 @@
 //! * **cgroups.** Work via systemd user-session delegation (rootless).
 
 mod crun;
+mod dbus;
 mod oci;
 mod overrides;
 mod resolve;
