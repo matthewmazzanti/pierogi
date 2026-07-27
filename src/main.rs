@@ -1,12 +1,12 @@
 //! Pierogi — a Nix-focused namespace runtime.
 //!
-//! Embeds an OCI runtime (libcrun) in-process and drives it from Rust to
-//! namespace + `exec` a process over a **sealed `/nix/store` rootfs** (see
-//! `docs/spec.md`). One backend, crun (via the FFI shim in `csrc/shim.c`):
-//! `libcrun_container_load_from_memory` takes the spec as an in-memory JSON
-//! string, so nothing touches disk — the core reason for the libcrun pivot, and
-//! why youki (which reads `config.json` off disk and can't RO-remount a store
-//! rootfs) was dropped.
+//! Drives an OCI runtime (the `crun` binary) from Rust to namespace + `exec` a
+//! process over a **sealed `/nix/store` rootfs** (see `docs/spec.md`). One
+//! backend: pierogi writes the OCI spec to a `config.json` and execs `crun`
+//! (`src/runtime/crun.rs`). youki was evaluated and dropped — it can't RO-remount
+//! a store rootfs; an earlier design linked libcrun in-process to keep the spec
+//! in memory, dropped once benchmarking showed the process boundary costs only a
+//! few milliseconds (see `docs/startup-performance.md`).
 //!
 //! Spike findings still load-bearing:
 //! * **devices.** Don't put device nodes in `mounts[]` (bind of a char device

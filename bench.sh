@@ -6,22 +6,16 @@
 # setup + teardown — the thing pierogi exists to make fast. The sandbox is the
 # pre-baked bash-sandbox (a sealed store-path rootfs); there is no live closure
 # query to skip anymore — the closure is stamped in at build time, so what's
-# left is exactly the runtime backend cost.
+# left is exactly the runtime cost: pierogi writing config.json + exec'ing crun,
+# then namespace/mount setup.
 #
-# Head-to-head: the same pierogi run under both crun backends, flipped by
-# $PIEROGI_BACKEND — everything upstream (spec build, store scaffold, state dir)
-# is identical, so the delta is exactly the process boundary:
-#   * lib  — libcrun linked in-process (the shim; spec stays in memory)
-#   * exec — fork+exec the crun *binary* ($CRUN_DEV/bin/crun, the same build),
-#            which reads the spec back off a materialized config.json
-# hyperfine's closing "N ± M times faster" line is the cost of dropping the
-# embedded libcrun.
+# One backend, crun (the binary). youki isn't in the mix: it cannot RO-remount a
+# /nix/store rootfs (EPERM — see todo.md). The libcrun-in-process backend was
+# dropped after a head-to-head showed it saved only a few ms (git log, and
+# docs/startup-performance.md).
 #
-# youki isn't in the mix: it cannot RO-remount a /nix/store rootfs (EPERM — see
-# todo.md), so both arms here are crun.
-#
-# Run inside `nix develop` (crun needs $CRUN_DEV + a C toolchain; hyperfine and
-# nix come from the devShell):
+# Run inside `nix develop` (hyperfine, nix, and the pinned crun come from the
+# devShell):
 #
 #   ./bench.sh            # 50 runs
 #   ./bench.sh 200        # 200 runs
@@ -58,5 +52,4 @@ echo
 hyperfine \
   --warmup 5 \
   --runs "$RUNS" \
-  -n 'lib  (embedded libcrun)' "PIEROGI_BACKEND=lib  $BIN run $SPEC" \
-  -n 'exec (crun binary)'      "PIEROGI_BACKEND=exec $BIN run $SPEC"
+  "$BIN run $SPEC"

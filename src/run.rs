@@ -66,12 +66,12 @@ fn launch(spec: Spec) -> Result<()> {
     let gid = unsafe { libc::getgid() };
 
     // `root` *is* the rootfs (an absolute store path mounted at `/` — see
-    // `oci::build_spec`), so there is no bundle to assemble; crun takes the spec
-    // as an in-memory JSON string (no config.json). What does touch disk is a
-    // per-run state dir: crun's own `state/`, and the `/nix/store` mountpoint
-    // stubs the engine binds read-only (`scaffold_store`). crun still wants a
-    // bundle *context* path, but with an absolute `root.path` its content is
-    // irrelevant — we point it at `work`.
+    // `oci::build_spec`), so there is no bundle to assemble. What touches disk is
+    // a per-run `work` dir: crun's own `state/`, the `/nix/store` mountpoint stubs
+    // the engine binds read-only (`scaffold_store`), and the `config.json` the
+    // crun backend writes into it. crun still wants a bundle *context* path, but
+    // with an absolute `root.path` its content is irrelevant — we point it at
+    // `work`.
     let id = format!("pierogi-{}", std::process::id());
     let work = runtime_dir().join(&id);
     let state = work.join("state");
@@ -100,8 +100,8 @@ fn launch(spec: Spec) -> Result<()> {
     };
     let console = relay.as_ref().map(ConsoleRelay::socket_path);
 
-    // Drive crun: it loads the spec from memory (no config.json) and blocks
-    // until the container exits.
+    // Drive crun: the backend writes the spec to `work/config.json`, execs the
+    // crun binary, and blocks until the container exits.
     let result = crate::runtime::run(&oci, &id, &work, &state, console);
 
     // Restore the terminal (join the relay) before anything else prints.

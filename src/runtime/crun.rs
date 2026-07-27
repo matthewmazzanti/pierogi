@@ -1,31 +1,34 @@
-//! libcrun backend: hand the spec to `csrc/shim.c` as an in-memory JSON string.
+//! crun backend: run a resolved OCI spec by exec'ing the `crun` binary.
 //!
-//! No `config.json` on disk — `libcrun_container_load_from_memory` parses the
-//! JSON directly. `root.path` is the **absolute** `root` store path (set by
-//! `oci::build_spec`), so it's cwd-independent and needs no rewrite here — the
-//! historical `bundle/rootfs` override is gone. The shim's `libcrun_container_
-//! run` blocks (detach=false) and returns the exit code.
+//! pierogi links nothing from crun — it materializes the spec as a `config.json`
+//! and drives the `crun` CLI as a subprocess. (An earlier design linked
+//! `libcrun` in-process via an FFI shim to keep the spec in memory; a head-to-head
+//! showed that bought only a few milliseconds — below the noise of the ~15-20ms
+//! namespace/mount setup — so the shim, the harvested libcrun dev tree, and the
+//! `--enable-shared` build override were dropped for the plain binary. See
+//! `docs/startup-performance.md`.)
+//!
+//! The crun binary reads its config off disk, so we write the OCI JSON to
+//! `<bundle>/config.json` and point crun at it with an **absolute** `-f`: crun
+//! resolves a relative `-f` against the invocation cwd *before* it chdirs into
+//! the bundle, so only an absolute path is safe. `-b` is the already-created
+//! `bundle` dir (its contents are irrelevant — `root.path` is absolute — but crun
+//! still requires a bundle to chdir into). `run` (detach=false) blocks until the
+//! container exits and propagates its exit status as crun's own.
+//!
+//! stdio is inherited so the container's output and crun's own logging land on
+//! the caller's terminal.
 
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use oci_spec::runtime::Spec;
 
-extern "C" {
-    /// Returns the container exit code (>= 0) or a negative error; on error,
-    /// `*err_out` is a malloc'd message we must `libc::free`. `console_socket`
-    /// is NULL unless the spec requests a terminal.
-    fn pierogi_crun_run(
-        json: *const c_char,
-        state_root: *const c_char,
-        bundle: *const c_char,
-        id: *const c_char,
-        console_socket: *const c_char,
-        err_out: *mut *mut c_char,
-    ) -> i32;
-}
+/// Absolute path to the `crun` binary, pinned at build time by Nix
+/// (`CRUN_BIN=${pkgs.crun}/bin/crun`). Baking the store path also makes crun a
+/// runtime dependency via Nix's reference scan — no PATH lookup, no drift.
+const CRUN: &str = env!("CRUN_BIN");
 
 pub fn run(
     spec: &Spec,
@@ -34,39 +37,37 @@ pub fn run(
     state: &Path,
     console_socket: Option<&Path>,
 ) -> Result<i32> {
-    // `root.path` is already the absolute `root` store path (set in
-    // `oci::build_spec`), so it doesn't depend on cwd — no rewrite needed.
+    // crun reads config off disk: materialize the spec as the bundle's
+    // config.json.
     let json = serde_json::to_string(spec).context("serializing spec to JSON")?;
+    let config = bundle.join("config.json");
+    std::fs::write(&config, &json).with_context(|| format!("writing {}", config.display()))?;
 
-    let c_json = CString::new(json).context("spec JSON had an interior NUL")?;
-    let c_state = CString::new(state.to_string_lossy().as_bytes())?;
-    let c_bundle = CString::new(bundle.to_string_lossy().as_bytes())?;
-    let c_id = CString::new(id)?;
-    // NULL → no terminal; a path → crun connects and sends the pty master there.
-    let c_console = console_socket
-        .map(|p| CString::new(p.to_string_lossy().as_bytes()))
-        .transpose()?;
-    let console_ptr = c_console.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
-
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let ret = unsafe {
-        pierogi_crun_run(
-            c_json.as_ptr(),
-            c_state.as_ptr(),
-            c_bundle.as_ptr(),
-            c_id.as_ptr(),
-            console_ptr,
-            &mut err,
-        )
-    };
-
-    if !err.is_null() {
-        let msg = unsafe { CStr::from_ptr(err) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { libc::free(err as *mut libc::c_void) };
-        bail!("libcrun: {msg}");
+    let mut cmd = Command::new(CRUN);
+    // Per-run state root, this bundle, this id, and an absolute `-f` (a relative
+    // one would resolve pre-chdir, not against the bundle).
+    cmd.arg("--root")
+        .arg(state)
+        .arg("run")
+        .arg("-b")
+        .arg(bundle)
+        .arg("-f")
+        .arg(&config);
+    // A terminal spec: crun connects to this socket and sends the pty master,
+    // which our `tty` relay (the listener at the other end) pumps against the
+    // caller's stdio.
+    if let Some(sock) = console_socket {
+        cmd.arg("--console-socket").arg(sock);
     }
+    cmd.arg(id);
 
-    Ok(ret)
+    let status = cmd.status().with_context(|| format!("spawning {CRUN}"))?;
+
+    // crun's exit code is the container's (detach=false propagates it); we can't
+    // distinguish a crun failure from the container's own non-zero exit, but its
+    // inherited stderr says which. Signal death has no code.
+    match status.code() {
+        Some(code) => Ok(code),
+        None => bail!("crun terminated by signal: {status}"),
+    }
 }
