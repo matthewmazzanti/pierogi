@@ -4,3 +4,6 @@
 
 # Per-sandbox persistent state, bind-mounted to /root in the sandboxes.
 /state/
+
+# local convenience symlink to the sibling turnip checkout (see docs/network.md)
+/network

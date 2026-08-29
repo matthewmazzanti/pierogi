@@ -22,6 +22,7 @@ mod resolve;
 mod run;
 mod spec;
 mod tty;
+mod unshare;
 
 use std::path::PathBuf;
 
@@ -70,6 +71,25 @@ enum Cmd {
         argv: Vec<String>,
     },
 
+    /// Run a command inside pierogi's persistent **user + mount namespace**,
+    /// starting the pause process that holds it if one isn't live
+    /// (`pierogi unshare [cmd…]`, default `$SHELL`). Mirrors `podman unshare`.
+    ///
+    /// This is the rootless registry of `docs/network.md`: a user namespace
+    /// carrying the invoker's subordinate-id range, plus a mount namespace in
+    /// which network namespaces can be bind-mounted at stable names. Nothing but
+    /// a live process can pin a rootless user namespace, so the pause process is
+    /// the persistence mechanism, not a daemon.
+    Unshare {
+        /// The command to run inside the namespace; defaults to `$SHELL`.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "CMD"
+        )]
+        argv: Vec<String>,
+    },
+
     /// Build a spec: traverse the reference graph from the spec's
     /// `closure.seeds` and stamp the resulting `closure.resolved`, then print the
     /// frozen spec. No live `nix-store` query — the graph is supplied. Driven by
@@ -97,6 +117,7 @@ fn main() -> Result<()> {
             let overrides = overrides::Overrides::parse(env, hostname, mount, argv)?;
             run::run_spec(spec, overrides)
         }
+        Cmd::Unshare { argv } => unshare::unshare_cmd(argv),
         Cmd::Resolve { spec, graph } => run::resolve_cmd(spec, graph),
     }
 }

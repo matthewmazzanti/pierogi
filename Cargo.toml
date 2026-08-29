@@ -16,7 +16,10 @@ libc = "0.2"
 # SCM_RIGHTS fd passing, poll, termios, signal masks. Keeps the fiddly cmsg
 # parsing out of hand-rolled unsafe. (libc stays for the winsize ioctl and the
 # async-signal-safe write in the SIGWINCH handler.)
-nix = { version = "0.31", features = ["socket", "uio", "poll", "term", "signal", "fs", "event"] }
+nix = { version = "0.31", features = ["socket", "uio", "poll", "term", "signal", "fs", "event",
+# `unshare`/`setns` (sched) + `fork`/`waitpid` (process) + passwd lookup (user):
+# the pause process that holds pierogi's persistent user+mount namespace.
+                                     "sched", "process", "user"] }
 # The OCI runtime spec types we build in `oci.rs` and serialize to the
 # `config.json` the crun binary reads.
 oci-spec = { version = "0.9", features = ["runtime"] }
