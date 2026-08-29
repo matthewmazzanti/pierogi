@@ -82,6 +82,7 @@ its role and history; `docs/` carries the design rationale.
 | the verbs / override & resolve pipeline | `docs/execution-modes.md`, `src/run.rs` header |
 | the engine/producer boundary, big picture | `docs/architecture.md`, `docs/vision.md` |
 | launch cost / why pre-bake | `docs/startup-performance.md` |
+| networking, netns attach, id ranges | `docs/network.md` |
 | what's planned vs done | `docs/roadmap.md`, `todo.md` |
 
 When you add non-obvious code, match the house style: a module/file header that

@@ -194,3 +194,60 @@ would fail the client→proxy auth. See the `dbus.nix` header for the full write
   above: that uid map has a build-time half (the normalized container id → Nix) and
   a runtime half (the host invoker id → arg), same seam. Work out the model before
   touching the schema.
+
+## networking — `pierogi net` + rootless attach (design)
+
+Full design, kernel rules and verified hazards: `docs/network.md`. The mechanism
+is verified end to end (rootful setup → registry pin → rootless attach → private
+per-sandbox userns → per-run subuid slices); none of it is built. These are the
+engine-side follow-ups that design surfaced.
+
+- [ ] **Implement the attach: a `--net` override plus one `setns` in a `pre_exec`
+  (`src/crun.rs`).** The engine enters only the *registry user namespace*; crun does
+  the rest from there, given `{type: user}` (fresh, no path) and
+  `{type: network, path: <netns>}` in `linux.namespaces`. Verified with the netns
+  named both as `/proc/<pin>/ns/net` and as a mount-pinned `/proc/<pin>/root/<name>`.
+  So the attachment rides the existing M1.5 pass-through and is visible in the
+  resolved spec — no bespoke `network` section is needed to satisfy invariant 4;
+  only the registry to enter is out-of-band, since that is the engine's exec context
+  rather than a namespace the sandbox joins. Two constraints: open the fds *before*
+  `setns(user)` (afterwards `/proc/<pin>/...` is `EACCES` from a sibling userns), and
+  **reject `{type: user, path: …}` combined with a network attach** — that puts the
+  sandbox *in* the owning userns, which is the single configuration that makes
+  `CAP_NET_ADMIN` live again (the OCI spelling of podman's `--userns=host`). That
+  rejection is the only guard the guarantee needs.
+
+- [ ] **`hostID` changes coordinate system under attachment.** C's map is written
+  in the *registry's* coordinates, not the host's — `C 1000 → U 50000 → host
+  149999`, verified by stat'ing a file the sandbox created. So identical spec text
+  denotes different host identities depending on whether `--net` was passed, which
+  breaks "the resolved spec is the complete, auditable record". Fix: `run` composes
+  the chain and stamps **real host ids** into the resolved spec. The same hazard
+  recurs in id-valued sysctls (`ping_group_range` rejects ids outside the
+  registry's space), so this wants one shared answer, not two local fixes.
+
+- [ ] **`self` must resolve after the join.** With a registry mapping `0 → 1000`,
+  `getuid()` returns **0** once joined, not 1000 — so `profiles.base`'s
+  `host = "self"` would stamp an id not mapped in the registry at all. Resolve it
+  after the join or translate through the registry's map. This is a concrete
+  forcing case for the `self` / runtime-values-as-arguments item above; solve them
+  together rather than point-fixing here.
+
+- [ ] **Pid reuse in the network handle.** The attach path embeds the pin's pid; if
+  the pin dies and the pid is recycled, `/proc/<pid>/root/<name>` resolves into an
+  unrelated process's mount view and may succeed against the *wrong* namespace.
+  Record each netns inode in the net artifact and verify after `setns`; prefer a
+  pidfd where the lifetime spans a launch.
+
+- [ ] **`net` must self-check attachability before exiting.** A netns created by
+  root in `init_user_ns` bind-mounts into the registry perfectly well and is then
+  unattachable *forever* (ownership is immutable). A successful mount is not
+  evidence of a working network, so `net` should drop to the invoking user and
+  attempt the real `setns(user)` → `setns(net)` on everything it built, failing the
+  whole invocation otherwise. Fail loud at build time, not at first launch.
+
+- [ ] **Decide the DNS/`resolv.conf` seam.** Synthetic `/etc` bakes resolv.conf at
+  build time; the network is created later and independently, so a moved DNS
+  address silently breaks every image baked against the old one. Either pin the
+  address as a constant images may bake against, or inject resolv.conf at runtime
+  through the override channel — same seam as the other genuinely-runtime values.

@@ -303,6 +303,60 @@ explicit in the profile and justified in writing, not blanket host exposure.
 
 ---
 
+## M8 — Networking: `pierogi net` + rootless attach  🌐
+
+> **Design and mechanism are settled and verified; none of it is built.** The full
+> rationale, the kernel rules, the hazards and the phase detail live in
+> [network.md](network.md) — this block is the milestone view only.
+
+A network is **pre-baked** by a privileged, short-lived verb and attached to
+rootlessly at launch — invariant 2 applied to networking. `sudo pierogi net up`
+does the rootful work and exits, leaving a **registry pin**: one unprivileged
+process holding a user namespace and a mount namespace, with each network a netns
+bind-mounted at a name inside it. `pierogi run --net <name>` joins the registry's
+user namespace and hands crun the netns by path; crun joins it and then unshares a
+**fresh** user namespace for the sandbox. The sandbox can *use* the network and
+cannot *shape* it — enforced by the kernel's capability model, not by policy the
+engine maintains.
+
+**Forces:** a `setns` in `pre_exec`, the first privileged verb in a rootless
+codebase, a second resolved-artifact kind (net-config → net-plan), synchronous
+netlink, and a third pinned binary (`nft`).
+
+- [ ] **N0 — attach spike.** Hand-made pin; `--net` override, inode verification,
+      `setns(CLONE_NEWUSER)` in `pre_exec`, and the guard that rejects
+      `{type: user, path}` alongside a network attach.
+- [ ] **N1 — the `net` verb, empty networks.** `setresuid` before `unshare`, root
+      writes the id slab, named netns bind-pinned, attachability self-check,
+      artifact emitted, attach-or-mint semantics.
+- [ ] **N2 — the lowering.** Net-config schema; `pierogi net plan` as a pure
+      unprivileged verb; the composed-mapping and `self`-under-attach fixes.
+- [ ] **N3 — links.** Sync netlink (veth, move-to-netns, address, route) plus the
+      naming/`/32` lowering and the router topology.
+- [ ] **N4 — policy.** nft ruleset + sysctl sets built in the lowering, pushed by
+      `up` via a `setns` episode and the pinned `nft`.
+- [ ] **N5 — host edge.** Uplink NAT/DNAT and links into the host LAN.
+- [ ] **N6 — reconcile in place.** `readState` → classify → execute, so a re-plan
+      preserves attached sandboxes.
+
+**Acceptance:** two sandboxes attach to one pre-baked network by name; an allowed
+flow connects and a denied one drops; a sandbox running as uid 0 with
+`CAP_NET_ADMIN` effective cannot rename, re-address, or re-route anything; and
+re-running `net up` leaves already-attached sandboxes in place.
+
+**Pure-realizer framing:** the *policy* — who exists, who may talk to whom, what
+crosses the edge — is producer data authored in Nix. The binary performs a
+**mechanical derivation** (config → plan) and then realizes it, which is
+`pierogi resolve`'s existing shape rather than a new kind of thing. The split into
+an unprivileged `plan` and a privileged `up` keeps validation ahead of privilege:
+`up` is total over a valid plan.
+
+**Note:** `net up` is the first code that runs as root. It is a distinct verb in a
+non-setuid binary, so the privileged path is compiled in but unreachable without an
+explicit `sudo` — the posture runc and crun already have.
+
+---
+
 ## M7 — Nix config / module layer  (DEFERRED / OPEN — last)
 
 > **Status: intentionally last and left open.** Not part of the core deliverable
@@ -343,8 +397,9 @@ path M1 runs, and the emitted spec matches the hand-written equivalent.
 
 ## Sequencing rationale
 
-M0 → nix-mode → D-Bus → GPU/Wayland → hardening → browser → Steam → config layer
-is **interest-and-uncertainty-driven**, a deliberate departure from harden-first:
+M0 → nix-mode → D-Bus → GPU/Wayland → hardening → browser → Steam → networking →
+config layer is **interest-and-uncertainty-driven**, a deliberate departure from
+harden-first:
 
 - **The spike (M0) still leads** — driving an OCI runtime to namespace + `exec`
   was the biggest unknown; everything else builds on it. That much is unchanged.
@@ -358,6 +413,11 @@ is **interest-and-uncertainty-driven**, a deliberate departure from harden-first
   is where the real unknowns live. Building them early also lets them **shape the
   spec's `dbus`/device/socket surface against real clients** rather than guesses
   (the M7-is-last philosophy, one level down).
+- **Networking (M8) is numbered after Steam but sits before M7** in this file,
+  because ordering here is execution sequence and M7 is last *by status*, not by
+  position (M1.5 already breaks numeric sequence for the same reason). It lands
+  once the engine's pass-through surface exists, since the attach is mostly
+  `linux.namespaces` plus one `setns`.
 - **The engine is reduced to a pure realizer early (M1.5)**, because that's what
   makes the rest cheap: once the engine holds no policy and passes the full OCI
   surface through, every later control is a one-line field, and "hardening" stops
