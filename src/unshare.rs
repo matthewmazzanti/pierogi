@@ -43,8 +43,13 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use nix::errno::Errno;
+use nix::fcntl::{open, OFlag};
 use nix::sched::{setns, unshare, CloneFlags};
-use nix::unistd::{fork, getgid, getuid, pipe, read, setsid, write, ForkResult, Pid, User};
+use nix::sys::stat::Mode;
+use nix::unistd::{
+    dup2_stderr, dup2_stdin, dup2_stdout, fork, getgid, getuid, pipe, read, setsid, write,
+    ForkResult, Pid, User,
+};
 use serde::{Deserialize, Serialize};
 
 /// The namespaces the pause process holds. `CLONE_NEWUSER` is the authority the
@@ -213,28 +218,24 @@ fn pause_child(ready: OwnedFd, go: OwnedFd) -> Result<(), Errno> {
     detach_stdio()?;
 
     loop {
-        unsafe { libc::pause() };
+        nix::unistd::pause();
     }
 }
 
 /// Replace stdin/stdout/stderr with `/dev/null`. Redirect rather than close, so a
 /// stray write lands in the void instead of on whatever later claims fd 1.
+///
+/// A `CStr` literal keeps this allocation-free: `NixPath` for `Path` builds a
+/// `CString`, and while our fork is from a single-threaded parent (so the malloc
+/// lock cannot be held by a vanished thread), staying allocation-free keeps the
+/// child correct if a thread is ever spawned earlier.
 fn detach_stdio() -> Result<(), Errno> {
-    // SAFETY: post-fork, so raw syscalls only — no allocation, no Rust IO types.
-    unsafe {
-        let null = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
-        if null < 0 {
-            return Err(Errno::last());
-        }
-        for target in 0..3 {
-            if libc::dup2(null, target) < 0 {
-                return Err(Errno::last());
-            }
-        }
-        if null > 2 {
-            libc::close(null);
-        }
-    }
+    let null = open(c"/dev/null", OFlag::O_RDWR, Mode::empty())?;
+    dup2_stdin(&null)?;
+    dup2_stdout(&null)?;
+    dup2_stderr(&null)?;
+    // `null` is >2 (0-2 are still the inherited stdio when we open it), so
+    // dropping it here closes only the extra descriptor.
     Ok(())
 }
 
