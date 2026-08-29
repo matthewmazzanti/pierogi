@@ -161,7 +161,7 @@ fn start_pause() -> Result<Pin> {
         ForkResult::Child => {
             drop(ready_r);
             drop(go_w);
-            let code = i32::from(pause_child(&ready_w, &go_r).is_err());
+            let code = i32::from(pause_child(ready_w, go_r).is_err());
             unsafe { libc::_exit(code) }
         }
         ForkResult::Parent { child } => {
@@ -183,27 +183,59 @@ fn start_pause() -> Result<Pin> {
 
 /// The pause process itself: unshare, announce, wait to be released, then hold the
 /// namespaces open forever. Post-fork, so syscalls only.
-fn pause_child(ready: &OwnedFd, go: &OwnedFd) -> Result<(), Errno> {
+fn pause_child(ready: OwnedFd, go: OwnedFd) -> Result<(), Errno> {
     // Detach from the caller's session so the pin outlives the terminal that
     // started it — a pause process killed by Ctrl-C would take every network
     // bind-mounted inside it.
     setsid()?;
     unshare(PIN_NAMESPACES)?;
-    write(ready, &[1u8])?;
+    write(&ready, &[1u8])?;
+    drop(ready); // said our piece; holding it open would just be another leak
+
     // Block until the parent has written the id maps. EOF here means the parent
     // failed or died; either way there is nothing to hold open for.
     let mut byte = [0u8; 1];
     loop {
-        match read(go, &mut byte) {
+        match read(&go, &mut byte) {
             Ok(1) => break,
             Ok(_) => return Err(Errno::EPIPE),
             Err(Errno::EINTR) => continue,
             Err(e) => return Err(e),
         }
     }
+    drop(go);
+
+    // A pin outlives its creator, so every fd it still holds is held *forever*.
+    // Inherited stdio is the one that bites: a pause process keeping the
+    // creator's stdout open leaves any reader — a pipeline, a command
+    // substitution — waiting on an EOF that never comes. Point stdio at
+    // /dev/null before going quiet.
+    detach_stdio()?;
+
     loop {
         unsafe { libc::pause() };
     }
+}
+
+/// Replace stdin/stdout/stderr with `/dev/null`. Redirect rather than close, so a
+/// stray write lands in the void instead of on whatever later claims fd 1.
+fn detach_stdio() -> Result<(), Errno> {
+    // SAFETY: post-fork, so raw syscalls only — no allocation, no Rust IO types.
+    unsafe {
+        let null = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
+        if null < 0 {
+            return Err(Errno::last());
+        }
+        for target in 0..3 {
+            if libc::dup2(null, target) < 0 {
+                return Err(Errno::last());
+            }
+        }
+        if null > 2 {
+            libc::close(null);
+        }
+    }
+    Ok(())
 }
 
 /// Parent half of the rendezvous: wait for the child to unshare, map it, release it.
