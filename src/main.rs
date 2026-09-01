@@ -75,10 +75,9 @@ enum Cmd {
     /// starting the pause process that holds it if one isn't live
     /// (`pierogi unshare [cmd…]`, default `$SHELL`).
     ///
-    /// **Unmapped, for now.** No id map is written, so the namespace maps
-    /// nothing: commands land as `nobody` with an empty capability set. Entering
-    /// works; doing anything does not. Mapping is a separate step with separate
-    /// failure modes — see `src/unshare.rs` and `docs/network.md`.
+    /// The namespace carries the invoker's `/etc/subuid` range, mapped `0 →
+    /// <uid>` plus the subordinate block, so a joined command runs as uid 0 with
+    /// a full capability set *inside* it — and none outside.
     ///
     /// A rootless user namespace has no filesystem identity and cannot be pinned
     /// by a path, so a live process holding it is the only persistence mechanism
