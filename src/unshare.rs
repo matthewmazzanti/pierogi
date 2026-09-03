@@ -36,6 +36,7 @@
 //! forces Go implementations to re-exec through a helper; Rust needs no such
 //! boundary.
 
+use std::ffi::CString;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
@@ -45,8 +46,10 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use nix::errno::Errno;
 use nix::fcntl::{open, OFlag};
+use nix::mount::{mount, MsFlags};
 use nix::sched::{setns, unshare, CloneFlags};
 use nix::sys::stat::Mode;
+use nix::unistd::mkdir;
 use nix::unistd::{
     dup2_stderr, dup2_stdin, dup2_stdout, fork, getgid, getuid, pipe, read, setsid, write,
     ForkResult, Pid, User,
@@ -55,6 +58,9 @@ use serde::{Deserialize, Serialize};
 
 /// What the pause process holds. `CLONE_NEWUSER` is the authority everything else
 /// will rest on; `CLONE_NEWNS` is what will let namespaces be named.
+/// A registry tmpfs holds empty mount targets and nothing else.
+const MS_NODEV_NOEXEC: MsFlags = MsFlags::MS_NODEV.union(MsFlags::MS_NOEXEC);
+
 const PIN_NAMESPACES: CloneFlags = CloneFlags::CLONE_NEWUSER.union(CloneFlags::CLONE_NEWNS);
 
 /// A live pause process. Both namespace inodes are recorded because a pid on its
@@ -159,6 +165,15 @@ fn ns_ino(pid: i32, which: &str) -> Result<u64> {
 /// must wait to be told its map exists — but with nothing to configure there is
 /// nothing to wait for.)
 fn start_pause() -> Result<Pin> {
+    // Create the mountpoint before forking: the child does no allocation, and the
+    // directory has to exist on the underlying filesystem either way.
+    let registry = registry_path();
+    std::fs::create_dir_all(&registry).with_context(|| format!("mkdir {}", registry.display()))?;
+    let reg_c = CString::new(registry.as_os_str().as_encoded_bytes())
+        .context("registry path contains a NUL")?;
+    let net_c = CString::new(registry.join("net").as_os_str().as_encoded_bytes())
+        .context("registry path contains a NUL")?;
+
     let (ready_r, ready_w) = pipe().context("creating pause ready pipe")?;
     let (go_r, go_w) = pipe().context("creating pause release pipe")?;
 
@@ -169,7 +184,7 @@ fn start_pause() -> Result<Pin> {
         ForkResult::Child => {
             drop(ready_r);
             drop(go_w);
-            let code = i32::from(pause_child(ready_w, go_r).is_err());
+            let code = i32::from(pause_child(ready_w, go_r, &reg_c, &net_c).is_err());
             unsafe { libc::_exit(code) }
         }
         ForkResult::Parent { child } => {
@@ -190,7 +205,12 @@ fn start_pause() -> Result<Pin> {
 
 /// The pause process: detach, unshare, announce, then hold forever.
 /// Post-fork, so syscalls only — no allocation, no destructors.
-fn pause_child(ready: OwnedFd, go: OwnedFd) -> Result<(), Errno> {
+fn pause_child(
+    ready: OwnedFd,
+    go: OwnedFd,
+    registry: &CString,
+    net_dir: &CString,
+) -> Result<(), Errno> {
     // Leave the caller's session so the pin outlives the terminal that started it:
     // a pause process killed by Ctrl-C takes everything it holds with it.
     setsid()?;
@@ -213,6 +233,10 @@ fn pause_child(ready: OwnedFd, go: OwnedFd) -> Result<(), Errno> {
         }
     }
     drop(go);
+
+    // Now that we are mapped, mount the registry. Everything below this point is
+    // invisible to the host: it can see the (empty) mountpoint and nothing else.
+    mount_registry(registry, net_dir)?;
 
     // A pin outlives its creator, so every fd it keeps is held *forever*.
     // Inherited stdio is the one that bites: holding the creator's stdout leaves
@@ -346,6 +370,31 @@ fn parse_subid(text: &str, user: &str) -> Result<(u32, u32)> {
     bail!("no entry for {user:?} — a rootless user namespace needs a subordinate id range")
 }
 
+/// Mount the private tmpfs the network registry lives on, and create `net/` in it.
+///
+/// The alternative — pinning network namespaces straight onto the host's runtime
+/// directory, which is what podman does — leaves the *mount targets* visible to
+/// the host as empty regular files, indistinguishable at a glance from live pins
+/// and outliving the process that made them. A private filesystem gives the
+/// registry exactly one lifetime: kill the pause process and every name it held
+/// is gone, with no residue in a directory other tools also write to.
+///
+/// It does **not** remove the need to check that a name is really an `nsfs` inode
+/// rather than a leftover empty file — a teardown that unmounts and then dies
+/// before unlinking still leaves one, just inside the pin rather than forever.
+fn mount_registry(registry: &CString, net_dir: &CString) -> Result<(), Errno> {
+    mount(
+        Some(c"tmpfs"),
+        registry.as_c_str(),
+        Some(c"tmpfs"),
+        MsFlags::MS_NOSUID | MS_NODEV_NOEXEC,
+        // Small on purpose: it holds nothing but empty mount targets.
+        Some(c"size=1m,mode=0700"),
+    )?;
+    mkdir(net_dir.as_c_str(), Mode::S_IRWXU)?;
+    Ok(())
+}
+
 /// Point stdin/stdout/stderr at `/dev/null`. Redirect rather than close, so a
 /// stray write lands in the void instead of on whatever later claims fd 1.
 ///
@@ -372,6 +421,15 @@ fn state_dir() -> PathBuf {
 
 fn pin_path() -> PathBuf {
     state_dir().join("pause.json")
+}
+
+/// The registry mountpoint. This directory is created on the *host* filesystem —
+/// a bind mount needs a target, and the target has to exist before anything can
+/// be mounted over it. The host therefore sees one empty directory, permanently,
+/// and never sees a single network name: those live on the tmpfs mounted over it,
+/// which exists only inside the pause process's mount namespace.
+fn registry_path() -> PathBuf {
+    state_dir().join("registry")
 }
 
 fn load_pin() -> Option<Pin> {

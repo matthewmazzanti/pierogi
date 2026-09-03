@@ -19,7 +19,9 @@ libc = "0.2"
 nix = { version = "0.31", features = ["socket", "uio", "poll", "term", "signal", "fs", "event",
 # `unshare`/`setns` (sched) + `fork`/`waitpid` (process) + passwd lookup (user):
 # the pause process that holds pierogi's persistent user+mount namespace.
-                                     "sched", "process", "user"] }
+                                     "sched", "process", "user",
+# `mount`: the private tmpfs the pause process holds the network registry on.
+                                     "mount"] }
 # The OCI runtime spec types we build in `oci.rs` and serialize to the
 # `config.json` the crun binary reads.
 oci-spec = { version = "0.9", features = ["runtime"] }
