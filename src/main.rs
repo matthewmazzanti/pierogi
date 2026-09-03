@@ -22,6 +22,7 @@ mod resolve;
 mod run;
 mod spec;
 mod tty;
+mod net;
 mod unshare;
 
 use std::path::PathBuf;
@@ -92,6 +93,23 @@ enum Cmd {
         argv: Vec<String>,
     },
 
+    /// Manage pinned network namespaces in the pause process's registry.
+    Net {
+        #[command(subcommand)]
+        cmd: NetCmd,
+    },
+
+    /// (internal) Join the pause namespace and pin a network there. Never
+    /// user-typed: it exists so the join can happen at the top of `main`, while
+    /// the process is still single-threaded, as `setns(CLONE_NEWUSER)` requires.
+    #[command(hide = true, name = "__net-create")]
+    NetCreate {
+        /// The pause process to join.
+        pin_pid: i32,
+        /// Absolute path of the pin, inside the registry.
+        path: PathBuf,
+    },
+
     /// Build a spec: traverse the reference graph from the spec's
     /// `closure.seeds` and stamp the resulting `closure.resolved`, then print the
     /// frozen spec. No live `nix-store` query — the graph is supplied. Driven by
@@ -104,6 +122,17 @@ enum Cmd {
         /// pierogi traverses it from the spec's `closure.seeds`. Required.
         #[arg(long)]
         graph: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetCmd {
+    /// Pin a network namespace at `name`. Idempotent: an existing network is
+    /// reported and left alone, never replaced — replacing would strand any
+    /// sandbox already attached to it.
+    Create {
+        /// The network's name; becomes a path component in the registry.
+        name: String,
     },
 }
 
@@ -120,6 +149,10 @@ fn main() -> Result<()> {
             run::run_spec(spec, overrides)
         }
         Cmd::Unshare { argv } => unshare::unshare_cmd(argv),
+        Cmd::Net { cmd } => match cmd {
+            NetCmd::Create { name } => net::create(&name),
+        },
+        Cmd::NetCreate { pin_pid, path } => net::helper_create(pin_pid, path),
         Cmd::Resolve { spec, graph } => run::resolve_cmd(spec, graph),
     }
 }

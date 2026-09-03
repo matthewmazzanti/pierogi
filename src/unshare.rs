@@ -68,10 +68,10 @@ const PIN_NAMESPACES: CloneFlags = CloneFlags::CLONE_NEWUSER.union(CloneFlags::C
 /// otherwise resolve to an unrelated process's namespaces — a failure that
 /// *succeeds*, which is the dangerous kind.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-struct Pin {
-    pid: i32,
-    user_ns: u64,
-    mnt_ns: u64,
+pub struct Pin {
+    pub pid: i32,
+    pub user_ns: u64,
+    pub mnt_ns: u64,
 }
 
 /// `pierogi unshare [cmd…]` — join the pause process's user + mount namespace and
@@ -126,9 +126,36 @@ pub fn unshare_cmd(argv: Vec<String>) -> Result<()> {
     }
 }
 
+/// Join a pause process's user + mount namespace **in this process**, permanently.
+///
+/// For a helper that does nothing else this is simpler than a `pre_exec`: call it
+/// first thing, and everything after runs inside the pin as a normal program, with
+/// allocation and error handling available. Two requirements:
+///
+/// * **Single-threaded.** `setns(CLONE_NEWUSER)` demands it, so this must precede
+///   any thread spawn. Rust spawns none on its own — unlike Go, which needs a C
+///   constructor running before its runtime to get the same window.
+/// * **One-way.** Once inside U there is no route back: authority over anything
+///   owned by `init_user_ns` is gone, permanently, even holding an fd for it. A
+///   process that needs the host network namespace must never call this.
+///
+/// Order matters: entering the user namespace is what grants the `CAP_SYS_ADMIN`
+/// that makes the mount-namespace join legal.
+pub fn enter_pin(pid: i32) -> Result<()> {
+    // Open both before joining anything: once inside U, `/proc/<pin>/...` is no
+    // longer openable from a sibling user namespace.
+    let user_ns = std::fs::File::open(format!("/proc/{pid}/ns/user"))
+        .with_context(|| format!("opening the pause process's user namespace (pid {pid})"))?;
+    let mnt_ns = std::fs::File::open(format!("/proc/{pid}/ns/mnt"))
+        .with_context(|| format!("opening the pause process's mount namespace (pid {pid})"))?;
+    setns(&user_ns, CloneFlags::CLONE_NEWUSER).context("joining the pause user namespace")?;
+    setns(&mnt_ns, CloneFlags::CLONE_NEWNS).context("joining the pause mount namespace")?;
+    Ok(())
+}
+
 /// Return a live pause process, starting one if the record is missing, dead, or
 /// has been recycled onto a different process.
-fn ensure_pin() -> Result<Pin> {
+pub fn ensure_pin() -> Result<Pin> {
     if let Some(pin) = load_pin() {
         if pin_is_live(&pin) {
             return Ok(pin);
@@ -423,12 +450,17 @@ fn pin_path() -> PathBuf {
     state_dir().join("pause.json")
 }
 
+/// Where pinned network namespaces are named, inside the registry tmpfs.
+pub fn net_dir() -> PathBuf {
+    registry_path().join("net")
+}
+
 /// The registry mountpoint. This directory is created on the *host* filesystem —
 /// a bind mount needs a target, and the target has to exist before anything can
 /// be mounted over it. The host therefore sees one empty directory, permanently,
 /// and never sees a single network name: those live on the tmpfs mounted over it,
 /// which exists only inside the pause process's mount namespace.
-fn registry_path() -> PathBuf {
+pub fn registry_path() -> PathBuf {
     state_dir().join("registry")
 }
 
